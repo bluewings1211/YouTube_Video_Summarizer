@@ -1,0 +1,544 @@
+openapi: 3.0.0
+info:
+  title: YouTube Summarizer API
+  description: AI-powered YouTube video summarization service with timestamps and keyword extraction
+  version: 1.0.0
+  contact:
+    name: API Support
+    url: https://github.com/your-org/youtube-summarizer
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Development server
+  - url: https://your-domain.com
+    description: Production server
+
+paths:
+  /api/v1/summarize:
+    post:
+      summary: Summarize YouTube Video
+      description: |
+        Extract transcript, generate summary, timestamps, and keywords from a YouTube video.
+        
+        This endpoint accepts a YouTube URL and returns:
+        - Video metadata (title, duration, video ID)
+        - AI-generated summary (max 500 words)
+        - Timestamped segments with importance ratings
+        - Extracted keywords (5-8 items)
+        - Processing performance metrics
+        
+        The service supports public videos with available transcripts in English and Chinese.
+      operationId: summarizeVideo
+      tags:
+        - Summarization
+      requestBody:
+        description: YouTube video URL to summarize
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SummarizeRequest'
+            examples:
+              example1:
+                summary: Basic video summarization
+                value:
+                  youtube_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+              example2:
+                summary: Short URL format
+                value:
+                  youtube_url: "https://youtu.be/dQw4w9WgXcQ"
+              example3:
+                summary: URL with timestamp
+                value:
+                  youtube_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s"
+      responses:
+        '200':
+          description: Successful summarization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SummarizeResponse'
+              examples:
+                success:
+                  summary: Successful response example
+                  value:
+                    video_id: "dQw4w9WgXcQ"
+                    title: "Rick Astley - Never Gonna Give You Up (Official Music Video)"
+                    duration: 213
+                    summary: "This music video features Rick Astley performing his iconic hit song 'Never Gonna Give You Up.' The video showcases classic 80s aesthetics with Rick's distinctive deep voice and dance moves..."
+                    timestamped_segments:
+                      - timestamp: "00:00:45"
+                        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=45s"
+                        description: "Main chorus begins with the iconic hook"
+                        importance_rating: 10
+                      - timestamp: "00:01:30"
+                        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s"
+                        description: "Dance sequence showcasing 80s choreography"
+                        importance_rating: 7
+                    keywords:
+                      - "Rick Astley"
+                      - "Never Gonna Give You Up"
+                      - "80s music"
+                      - "pop music"
+                      - "music video"
+                    processing_time: 3.24
+        '400':
+          description: Bad Request - Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_url:
+                  summary: Invalid YouTube URL
+                  value:
+                    error:
+                      code: "E1001"
+                      category: "validation"
+                      severity: "medium"
+                      title: "Invalid YouTube URL Format"
+                      message: "The provided URL is not a valid YouTube video URL"
+                      suggested_actions:
+                        - "Check URL format"
+                        - "Ensure URL starts with https://www.youtube.com/watch or https://youtu.be/"
+                        - "Try again"
+                      is_recoverable: true
+                      timestamp: "2024-01-15T10:30:00Z"
+        '404':
+          description: Video not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                video_not_found:
+                  summary: Video not accessible
+                  value:
+                    error:
+                      code: "E2001"
+                      category: "content"
+                      severity: "medium"
+                      title: "Video Not Found"
+                      message: "The requested video could not be found or is not accessible"
+                      suggested_actions:
+                        - "Check video URL"
+                        - "Ensure video is public"
+                        - "Try a different video"
+                      is_recoverable: true
+                      timestamp: "2024-01-15T10:30:00Z"
+        '422':
+          description: Unprocessable Entity - Video issues
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                no_transcript:
+                  summary: No transcript available
+                  value:
+                    error:
+                      code: "E2003"
+                      category: "content"
+                      severity: "medium"
+                      title: "Transcript Not Available"
+                      message: "No transcript is available for this video"
+                      suggested_actions:
+                        - "Try videos with auto-generated captions"
+                        - "Use videos with manual transcripts"
+                        - "Try different content"
+                      is_recoverable: true
+                      timestamp: "2024-01-15T10:30:00Z"
+                video_too_long:
+                  summary: Video duration exceeds limit
+                  value:
+                    error:
+                      code: "E2005"
+                      category: "content"
+                      severity: "medium"
+                      title: "Video Duration Exceeds Limit"
+                      message: "Video duration exceeds the maximum allowed limit of 30 minutes"
+                      suggested_actions:
+                        - "Use shorter videos"
+                        - "Try videos under 30 minutes"
+                        - "Split content into smaller segments"
+                      is_recoverable: true
+                      timestamp: "2024-01-15T10:30:00Z"
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                llm_error:
+                  summary: LLM service error
+                  value:
+                    error:
+                      code: "E3001"
+                      category: "llm"
+                      severity: "high"
+                      title: "LLM Service Error"
+                      message: "The AI service is temporarily unavailable"
+                      suggested_actions:
+                        - "Try again later"
+                        - "Check service status"
+                        - "Contact support if problem persists"
+                      is_recoverable: true
+                      timestamp: "2024-01-15T10:30:00Z"
+
+  /health:
+    get:
+      summary: Health Check
+      description: Check the health status of the API service
+      operationId: healthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                healthy:
+                  summary: Healthy service
+                  value:
+                    status: "healthy"
+                    timestamp: "2024-01-15T10:30:00Z"
+                    version: "1.0.0"
+                    workflow_ready: true
+
+  /metrics:
+    get:
+      summary: Get Metrics
+      description: Get application metrics for monitoring
+      operationId: getMetrics
+      tags:
+        - Monitoring
+      responses:
+        '200':
+          description: Metrics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+              examples:
+                metrics:
+                  summary: Application metrics
+                  value:
+                    uptime_seconds: 3600
+                    timestamp: "2024-01-15T10:30:00Z"
+                    version: "1.0.0"
+                    workflow_status:
+                      initialized: true
+                      ready: true
+
+  /:
+    get:
+      summary: Root Information
+      description: Get basic API information and available endpoints
+      operationId: rootInfo
+      tags:
+        - Root
+      responses:
+        '200':
+          description: API information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RootResponse'
+              examples:
+                info:
+                  summary: API information
+                  value:
+                    service: "YouTube Summarizer"
+                    version: "1.0.0"
+                    description: "AI-powered YouTube video summarization service"
+                    endpoints:
+                      summarize: "/api/v1/summarize"
+                      health: "/health"
+                      docs: "/api/docs"
+                    timestamp: "2024-01-15T10:30:00Z"
+
+components:
+  schemas:
+    SummarizeRequest:
+      type: object
+      required:
+        - youtube_url
+      properties:
+        youtube_url:
+          type: string
+          format: uri
+          description: YouTube video URL to summarize
+          example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+          pattern: '^https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/|m\.youtube\.com/watch\?v=)[a-zA-Z0-9_-]{11}'
+
+    SummarizeResponse:
+      type: object
+      required:
+        - video_id
+        - title
+        - duration
+        - summary
+        - timestamped_segments
+        - keywords
+        - processing_time
+      properties:
+        video_id:
+          type: string
+          description: YouTube video ID
+          example: "dQw4w9WgXcQ"
+        title:
+          type: string
+          description: Video title
+          example: "Rick Astley - Never Gonna Give You Up (Official Music Video)"
+        duration:
+          type: integer
+          description: Video duration in seconds
+          example: 213
+        summary:
+          type: string
+          description: AI-generated summary (max 500 words)
+          example: "This music video features Rick Astley performing his iconic hit song..."
+        timestamped_segments:
+          type: array
+          description: List of important timestamped segments
+          items:
+            $ref: '#/components/schemas/TimestampedSegment'
+        keywords:
+          type: array
+          description: Extracted keywords (5-8 items)
+          items:
+            type: string
+          example: ["Rick Astley", "Never Gonna Give You Up", "80s music", "pop music", "music video"]
+        processing_time:
+          type: number
+          format: float
+          description: Processing time in seconds
+          example: 3.24
+
+    TimestampedSegment:
+      type: object
+      required:
+        - timestamp
+        - url
+        - description
+        - importance_rating
+      properties:
+        timestamp:
+          type: string
+          description: Timestamp in HH:MM:SS or MM:SS format
+          example: "01:30"
+          pattern: '^([0-9]{1,2}:)?[0-9]{1,2}:[0-9]{2}$'
+        url:
+          type: string
+          format: uri
+          description: YouTube URL with timestamp parameter
+          example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s"
+        description:
+          type: string
+          description: Brief description of the segment content
+          example: "Introduction to key concept"
+        importance_rating:
+          type: integer
+          description: Importance rating from 1-10
+          minimum: 1
+          maximum: 10
+          example: 8
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - category
+            - severity
+            - title
+            - message
+            - suggested_actions
+            - is_recoverable
+            - timestamp
+          properties:
+            code:
+              type: string
+              description: Error code
+              example: "E1001"
+            category:
+              type: string
+              description: Error category
+              enum: ["validation", "content", "llm", "network", "system"]
+              example: "validation"
+            severity:
+              type: string
+              description: Error severity level
+              enum: ["low", "medium", "high", "critical"]
+              example: "medium"
+            title:
+              type: string
+              description: Error title
+              example: "Invalid YouTube URL Format"
+            message:
+              type: string
+              description: User-friendly error message
+              example: "Please provide a valid YouTube video URL"
+            suggested_actions:
+              type: array
+              description: Suggested actions to resolve the error
+              items:
+                type: string
+              example: ["Check URL format", "Try again"]
+            is_recoverable:
+              type: boolean
+              description: Whether the error is recoverable
+              example: true
+            timestamp:
+              type: string
+              format: date-time
+              description: Error timestamp
+              example: "2024-01-15T10:30:00Z"
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - timestamp
+        - version
+        - workflow_ready
+      properties:
+        status:
+          type: string
+          description: Service health status
+          enum: ["healthy", "unhealthy"]
+          example: "healthy"
+        timestamp:
+          type: string
+          format: date-time
+          description: Current timestamp
+          example: "2024-01-15T10:30:00Z"
+        version:
+          type: string
+          description: API version
+          example: "1.0.0"
+        workflow_ready:
+          type: boolean
+          description: Whether the workflow engine is initialized
+          example: true
+
+    MetricsResponse:
+      type: object
+      required:
+        - uptime_seconds
+        - timestamp
+        - version
+        - workflow_status
+      properties:
+        uptime_seconds:
+          type: number
+          description: Service uptime in seconds
+          example: 3600
+        timestamp:
+          type: string
+          format: date-time
+          description: Current timestamp
+          example: "2024-01-15T10:30:00Z"
+        version:
+          type: string
+          description: API version
+          example: "1.0.0"
+        workflow_status:
+          type: object
+          description: Workflow engine status
+          properties:
+            initialized:
+              type: boolean
+              description: Whether workflow is initialized
+              example: true
+            ready:
+              type: boolean
+              description: Whether workflow is ready
+              example: true
+
+    RootResponse:
+      type: object
+      required:
+        - service
+        - version
+        - description
+        - endpoints
+        - timestamp
+      properties:
+        service:
+          type: string
+          description: Service name
+          example: "YouTube Summarizer"
+        version:
+          type: string
+          description: API version
+          example: "1.0.0"
+        description:
+          type: string
+          description: Service description
+          example: "AI-powered YouTube video summarization service"
+        endpoints:
+          type: object
+          description: Available endpoints
+          properties:
+            summarize:
+              type: string
+              example: "/api/v1/summarize"
+            health:
+              type: string
+              example: "/health"
+            docs:
+              type: string
+              example: "/api/docs"
+        timestamp:
+          type: string
+          format: date-time
+          description: Current timestamp
+          example: "2024-01-15T10:30:00Z"
+
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      description: Unique request identifier
+      required: false
+      schema:
+        type: string
+        example: "req_1642234200000"
+
+  headers:
+    X-Process-Time:
+      description: Processing time in seconds
+      schema:
+        type: string
+        example: "3.240"
+    X-Request-ID:
+      description: Unique request identifier
+      schema:
+        type: string
+        example: "req_1642234200000"
+
+tags:
+  - name: Summarization
+    description: Video summarization operations
+  - name: Health
+    description: Service health and status
+  - name: Monitoring
+    description: Application monitoring and metrics
+  - name: Root
+    description: API information and discovery
+
+externalDocs:
+  description: Find more information in the full API documentation
+  url: https://github.com/your-org/youtube-summarizer/docs/api-documentation.md
