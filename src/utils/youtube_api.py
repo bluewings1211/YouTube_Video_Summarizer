@@ -39,6 +39,26 @@ class YouTubeTranscriptError(Exception):
     pass
 
 
+class UnsupportedVideoTypeError(YouTubeTranscriptError):
+    """Raised when video type is not supported for transcript extraction."""
+    pass
+
+
+class PrivateVideoError(UnsupportedVideoTypeError):
+    """Raised when video is private."""
+    pass
+
+
+class LiveVideoError(UnsupportedVideoTypeError):
+    """Raised when video is live content."""
+    pass
+
+
+class NoTranscriptAvailableError(UnsupportedVideoTypeError):
+    """Raised when no transcripts are available for the video."""
+    pass
+
+
 class YouTubeVideoMetadataExtractor:
     """Extracts video metadata from YouTube."""
     
@@ -191,6 +211,114 @@ class YouTubeVideoMetadataExtractor:
             return f"{hours}:{minutes:02d}:{seconds:02d}"
         else:
             return f"{minutes}:{seconds:02d}"
+    
+    def detect_unsupported_video_type(self, video_id: str) -> Dict[str, Any]:
+        """
+        Detect if a video has unsupported characteristics for transcript extraction.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Dictionary containing video support status and details
+            
+        Raises:
+            YouTubeTranscriptError: If video cannot be analyzed
+        """
+        try:
+            # Extract metadata to check video characteristics
+            metadata = self.extract_video_metadata(video_id)
+            
+            issues = []
+            is_supported = True
+            
+            # Check if video is private
+            if metadata.get('is_private', False):
+                issues.append({
+                    'type': 'private',
+                    'severity': 'critical',
+                    'message': 'Video is private and cannot be accessed'
+                })
+                is_supported = False
+            
+            # Check if video is live content
+            if metadata.get('is_live', False):
+                issues.append({
+                    'type': 'live',
+                    'severity': 'critical',
+                    'message': 'Live videos do not have transcripts available'
+                })
+                is_supported = False
+            
+            # Check if video has no title (might be unavailable)
+            if not metadata.get('title'):
+                issues.append({
+                    'type': 'unavailable',
+                    'severity': 'warning',
+                    'message': 'Video title could not be extracted, may be unavailable'
+                })
+            
+            # Check if video has no duration (might be unavailable)
+            if not metadata.get('duration_seconds'):
+                issues.append({
+                    'type': 'no_duration',
+                    'severity': 'warning',
+                    'message': 'Video duration could not be determined'
+                })
+            
+            return {
+                'video_id': video_id,
+                'is_supported': is_supported,
+                'issues': issues,
+                'metadata': metadata,
+                'check_timestamp': datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error detecting video type for {video_id}: {str(e)}")
+            raise YouTubeTranscriptError(f"Failed to analyze video: {str(e)}")
+    
+    def check_transcript_availability(self, video_id: str) -> Dict[str, Any]:
+        """
+        Check if transcripts are available for a video without fetching them.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Dictionary containing transcript availability information
+            
+        Raises:
+            YouTubeTranscriptError: If video cannot be analyzed
+        """
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            
+            # Try to list available transcripts
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            available_transcripts = []
+            for transcript in transcript_list:
+                available_transcripts.append({
+                    'language': transcript.language,
+                    'language_code': transcript.language_code,
+                    'is_generated': transcript.is_generated,
+                    'is_translatable': transcript.is_translatable
+                })
+            
+            return {
+                'video_id': video_id,
+                'has_transcripts': len(available_transcripts) > 0,
+                'transcript_count': len(available_transcripts),
+                'available_transcripts': available_transcripts,
+                'check_timestamp': datetime.utcnow().isoformat()
+            }
+            
+        except VideoUnavailable:
+            raise YouTubeTranscriptError("Video is unavailable")
+        except Exception as e:
+            logger.error(f"Error checking transcript availability for {video_id}: {str(e)}")
+            raise YouTubeTranscriptError(f"Failed to check transcript availability: {str(e)}")
 
 
 class YouTubeTranscriptFetcher:
@@ -205,7 +333,8 @@ class YouTubeTranscriptFetcher:
         self, 
         video_id: str, 
         languages: Optional[List[str]] = None,
-        include_metadata: bool = True
+        include_metadata: bool = True,
+        check_unsupported: bool = True
     ) -> Dict[str, Any]:
         """
         Fetch transcript for a YouTube video.
@@ -214,12 +343,14 @@ class YouTubeTranscriptFetcher:
             video_id: YouTube video ID
             languages: Preferred languages for transcript (default: ['en'])
             include_metadata: Whether to include video metadata (default: True)
+            check_unsupported: Whether to check for unsupported video types (default: True)
             
         Returns:
             Dictionary containing transcript data and metadata
             
         Raises:
             YouTubeTranscriptError: If transcript cannot be fetched
+            UnsupportedVideoTypeError: If video type is not supported
         """
         if not video_id:
             raise YouTubeTranscriptError("Video ID is required")
@@ -229,6 +360,24 @@ class YouTubeTranscriptFetcher:
             
         if languages is None:
             languages = ['en']
+        
+        # Check for unsupported video types first
+        if check_unsupported:
+            try:
+                support_status = self.metadata_extractor.detect_unsupported_video_type(video_id)
+                
+                if not support_status['is_supported']:
+                    for issue in support_status['issues']:
+                        if issue['type'] == 'private':
+                            raise PrivateVideoError("Video is private and cannot be accessed")
+                        elif issue['type'] == 'live':
+                            raise LiveVideoError("Live videos do not have transcripts available")
+                        
+            except (PrivateVideoError, LiveVideoError):
+                raise  # Re-raise these specific errors
+            except Exception as e:
+                logger.warning(f"Could not check video support status for {video_id}: {str(e)}")
+                # Continue with transcript fetch attempt
             
         try:
             # Fetch transcript
@@ -270,11 +419,11 @@ class YouTubeTranscriptFetcher:
             
         except TranscriptsDisabled:
             logger.error(f"Transcripts disabled for video {video_id}")
-            raise YouTubeTranscriptError("Transcripts are disabled for this video")
+            raise NoTranscriptAvailableError("Transcripts are disabled for this video")
             
         except NoTranscriptFound:
             logger.error(f"No transcript found for video {video_id}")
-            raise YouTubeTranscriptError(
+            raise NoTranscriptAvailableError(
                 f"No transcript found for this video in languages: {languages}"
             )
             
@@ -294,7 +443,8 @@ class YouTubeTranscriptFetcher:
         self, 
         url: str, 
         languages: Optional[List[str]] = None,
-        include_metadata: bool = True
+        include_metadata: bool = True,
+        check_unsupported: bool = True
     ) -> Dict[str, Any]:
         """
         Fetch transcript from a YouTube URL.
@@ -303,12 +453,14 @@ class YouTubeTranscriptFetcher:
             url: YouTube URL
             languages: Preferred languages for transcript
             include_metadata: Whether to include video metadata
+            check_unsupported: Whether to check for unsupported video types
             
         Returns:
             Dictionary containing transcript data and metadata
             
         Raises:
             YouTubeTranscriptError: If URL is invalid or transcript cannot be fetched
+            UnsupportedVideoTypeError: If video type is not supported
         """
         # Validate URL and extract video ID
         is_valid, video_id = YouTubeURLValidator.validate_and_extract(url)
@@ -316,7 +468,7 @@ class YouTubeTranscriptFetcher:
         if not is_valid or not video_id:
             raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
             
-        return self.fetch_transcript(video_id, languages, include_metadata)
+        return self.fetch_transcript(video_id, languages, include_metadata, check_unsupported)
     
     def get_available_transcripts(self, video_id: str) -> List[Dict[str, Any]]:
         """
@@ -395,6 +547,78 @@ class YouTubeTranscriptFetcher:
             
         return self.get_video_metadata(video_id)
     
+    def check_video_support(self, video_id: str) -> Dict[str, Any]:
+        """
+        Check if a video is supported for transcript extraction.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Dictionary containing video support status
+            
+        Raises:
+            YouTubeTranscriptError: If video cannot be analyzed
+        """
+        return self.metadata_extractor.detect_unsupported_video_type(video_id)
+    
+    def check_video_support_from_url(self, url: str) -> Dict[str, Any]:
+        """
+        Check if a video is supported for transcript extraction from URL.
+        
+        Args:
+            url: YouTube URL
+            
+        Returns:
+            Dictionary containing video support status
+            
+        Raises:
+            YouTubeTranscriptError: If URL is invalid or video cannot be analyzed
+        """
+        # Validate URL and extract video ID
+        is_valid, video_id = YouTubeURLValidator.validate_and_extract(url)
+        
+        if not is_valid or not video_id:
+            raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
+            
+        return self.check_video_support(video_id)
+    
+    def check_transcript_availability(self, video_id: str) -> Dict[str, Any]:
+        """
+        Check transcript availability for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Dictionary containing transcript availability info
+            
+        Raises:
+            YouTubeTranscriptError: If video cannot be analyzed
+        """
+        return self.metadata_extractor.check_transcript_availability(video_id)
+    
+    def check_transcript_availability_from_url(self, url: str) -> Dict[str, Any]:
+        """
+        Check transcript availability for a video from URL.
+        
+        Args:
+            url: YouTube URL
+            
+        Returns:
+            Dictionary containing transcript availability info
+            
+        Raises:
+            YouTubeTranscriptError: If URL is invalid or video cannot be analyzed
+        """
+        # Validate URL and extract video ID
+        is_valid, video_id = YouTubeURLValidator.validate_and_extract(url)
+        
+        if not is_valid or not video_id:
+            raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
+            
+        return self.check_transcript_availability(video_id)
+    
     def _calculate_duration(self, transcript_list: List[Dict[str, Any]]) -> float:
         """
         Calculate video duration from transcript data.
@@ -449,7 +673,8 @@ class YouTubeTranscriptFetcher:
 def fetch_youtube_transcript(
     video_id: str, 
     languages: Optional[List[str]] = None,
-    include_metadata: bool = True
+    include_metadata: bool = True,
+    check_unsupported: bool = True
 ) -> Dict[str, Any]:
     """
     Convenience function to fetch YouTube transcript.
@@ -458,18 +683,20 @@ def fetch_youtube_transcript(
         video_id: YouTube video ID
         languages: Preferred languages for transcript
         include_metadata: Whether to include video metadata
+        check_unsupported: Whether to check for unsupported video types
         
     Returns:
         Dictionary containing transcript data and metadata
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.fetch_transcript(video_id, languages, include_metadata)
+    return fetcher.fetch_transcript(video_id, languages, include_metadata, check_unsupported)
 
 
 def fetch_youtube_transcript_from_url(
     url: str, 
     languages: Optional[List[str]] = None,
-    include_metadata: bool = True
+    include_metadata: bool = True,
+    check_unsupported: bool = True
 ) -> Dict[str, Any]:
     """
     Convenience function to fetch YouTube transcript from URL.
@@ -478,12 +705,13 @@ def fetch_youtube_transcript_from_url(
         url: YouTube URL
         languages: Preferred languages for transcript
         include_metadata: Whether to include video metadata
+        check_unsupported: Whether to check for unsupported video types
         
     Returns:
         Dictionary containing transcript data and metadata
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.fetch_transcript_from_url(url, languages, include_metadata)
+    return fetcher.fetch_transcript_from_url(url, languages, include_metadata, check_unsupported)
 
 
 def get_available_youtube_transcripts(video_id: str) -> List[Dict[str, Any]]:
@@ -526,3 +754,59 @@ def get_youtube_video_metadata_from_url(url: str) -> Dict[str, Any]:
     """
     fetcher = YouTubeTranscriptFetcher()
     return fetcher.get_video_metadata_from_url(url)
+
+
+def check_youtube_video_support(video_id: str) -> Dict[str, Any]:
+    """
+    Convenience function to check if a YouTube video is supported.
+    
+    Args:
+        video_id: YouTube video ID
+        
+    Returns:
+        Dictionary containing video support status
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.check_video_support(video_id)
+
+
+def check_youtube_video_support_from_url(url: str) -> Dict[str, Any]:
+    """
+    Convenience function to check if a YouTube video is supported from URL.
+    
+    Args:
+        url: YouTube URL
+        
+    Returns:
+        Dictionary containing video support status
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.check_video_support_from_url(url)
+
+
+def check_youtube_transcript_availability(video_id: str) -> Dict[str, Any]:
+    """
+    Convenience function to check YouTube transcript availability.
+    
+    Args:
+        video_id: YouTube video ID
+        
+    Returns:
+        Dictionary containing transcript availability info
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.check_transcript_availability(video_id)
+
+
+def check_youtube_transcript_availability_from_url(url: str) -> Dict[str, Any]:
+    """
+    Convenience function to check YouTube transcript availability from URL.
+    
+    Args:
+        url: YouTube URL
+        
+    Returns:
+        Dictionary containing transcript availability info
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.check_transcript_availability_from_url(url)
