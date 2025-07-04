@@ -35,9 +35,15 @@ class AppConfig(BaseModel):
     anthropic_model: str = config('ANTHROPIC_MODEL', default='claude-3-sonnet-20240229')
     max_tokens: int = config('MAX_TOKENS', default=4000, cast=int)
     temperature: float = config('TEMPERATURE', default=0.7, cast=float)
+    llm_timeout: int = config('LLM_TIMEOUT', default=60, cast=int)
+    llm_summarization_timeout: int = config('LLM_SUMMARIZATION_TIMEOUT', default=120, cast=int)
+    llm_keyword_timeout: int = config('LLM_KEYWORD_TIMEOUT', default=45, cast=int)
+    llm_timestamp_timeout: int = config('LLM_TIMESTAMP_TIMEOUT', default=90, cast=int)
     
     # YouTube API
     youtube_api_timeout: int = config('YOUTUBE_API_TIMEOUT', default=30, cast=int)
+    youtube_metadata_timeout: int = config('YOUTUBE_METADATA_TIMEOUT', default=15, cast=int)
+    transcript_fetch_timeout: int = config('TRANSCRIPT_FETCH_TIMEOUT', default=45, cast=int)
     max_video_duration: int = config('MAX_VIDEO_DURATION', default=1800, cast=int)
     retry_attempts: int = config('RETRY_ATTEMPTS', default=3, cast=int)
     retry_delay: int = config('RETRY_DELAY', default=1, cast=int)
@@ -62,6 +68,8 @@ class AppConfig(BaseModel):
     
     # Performance
     request_timeout: int = config('REQUEST_TIMEOUT', default=300, cast=int)
+    workflow_timeout: int = config('WORKFLOW_TIMEOUT', default=600, cast=int)
+    node_timeout: int = config('NODE_TIMEOUT', default=180, cast=int)
     max_content_length: str = config('MAX_CONTENT_LENGTH', default='50MB')
     enable_caching: bool = config('ENABLE_CACHING', default=True, cast=bool)
     
