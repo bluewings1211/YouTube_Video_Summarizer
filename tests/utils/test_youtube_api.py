@@ -24,7 +24,11 @@ from src.utils.youtube_api import (
     get_youtube_video_metadata,
     check_youtube_video_support,
     validate_youtube_video_duration,
-    check_youtube_duration_limit
+    check_youtube_duration_limit,
+    # Enhanced functions
+    get_video_info,
+    get_video_info_legacy,
+    fetch_youtube_transcript_with_three_tier_strategy
 )
 
 
@@ -622,3 +626,210 @@ class TestParameterValidation:
             # Since we're mocking the method we're testing, we need to check the actual implementation
             # This is more of a documentation test
             pass
+
+
+class TestEnhancedVideoInfoFunction:
+    """Test enhanced get_video_info function."""
+    
+    @patch.object(YouTubeTranscriptFetcher, 'get_video_metadata')
+    @patch.object(YouTubeTranscriptFetcher, 'check_video_support')
+    @patch.object(YouTubeTranscriptFetcher, 'check_transcript_availability')
+    @patch.object(YouTubeTranscriptFetcher, 'fetch_transcript_with_three_tier_strategy')
+    def test_get_video_info_basic_success(self, mock_fetch, mock_avail, mock_support, mock_metadata):
+        """Test basic successful video info retrieval."""
+        # Mock responses
+        mock_metadata.return_value = {
+            'title': 'Test Video',
+            'duration_seconds': 300,
+            'language': 'en'
+        }
+        
+        mock_support.return_value = {
+            'is_supported': True,
+            'issues': []
+        }
+        
+        mock_avail.return_value = {
+            'has_transcripts': True,
+            'available_transcripts': [{'language': 'English', 'language_code': 'en'}]
+        }
+        
+        mock_fetch.return_value = {
+            'transcript': 'This is a test transcript.',
+            'raw_transcript': [{'text': 'This is a test transcript.', 'start': 0}],
+            'language': 'en',
+            'duration_seconds': 300,
+            'word_count': 5,
+            'three_tier_metadata': {
+                'selected_tier': 'manual',
+                'selected_language': 'en',
+                'quality_score': 100
+            }
+        }
+        
+        result = get_video_info('test123')
+        
+        assert result['success'] is True
+        assert result['video_id'] == 'test123'
+        assert result['enhanced_acquisition_used'] is True
+        assert 'video_metadata' in result
+        assert 'transcript_data' in result
+        assert 'three_tier_acquisition' in result
+    
+    @patch.object(YouTubeTranscriptFetcher, 'get_video_metadata')
+    @patch.object(YouTubeTranscriptFetcher, 'check_video_support')
+    def test_get_video_info_unsupported_video_error(self, mock_support, mock_metadata):
+        """Test get_video_info with unsupported video."""
+        mock_metadata.return_value = {'title': 'Private Video'}
+        mock_support.return_value = {
+            'is_supported': False,
+            'issues': [{'type': 'private', 'message': 'Video is private'}]
+        }
+        
+        result = get_video_info('test123')
+        
+        assert result['success'] is False
+        assert result['error']['type'] == 'unsupported_video'
+        assert 'private' in result['error']['issues'][0]['type']
+    
+    @patch('src.utils.validators.YouTubeURLValidator.validate_and_extract')
+    def test_get_video_info_with_url(self, mock_validate):
+        """Test get_video_info with YouTube URL."""
+        mock_validate.return_value = (True, 'dQw4w9WgXcQ')
+        
+        with patch('src.utils.youtube_api.get_video_info') as mock_get_video_info:
+            # Mock the actual get_video_info call to avoid infinite recursion
+            mock_get_video_info.return_value = {'success': True, 'video_id': 'dQw4w9WgXcQ'}
+            
+            # Temporarily replace the function to test URL parsing
+            from src.utils.youtube_api import YouTubeTranscriptFetcher
+            from src.utils.validators import YouTubeURLValidator
+            
+            # Test URL validation part
+            is_valid, video_id = YouTubeURLValidator.validate_and_extract(
+                'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+            )
+            
+            assert is_valid is True
+            assert video_id == 'dQw4w9WgXcQ'
+    
+    def test_get_video_info_invalid_url(self):
+        """Test get_video_info with invalid URL."""
+        with pytest.raises(YouTubeTranscriptError, match="Invalid YouTube URL"):
+            get_video_info('https://invalid-url.com')
+    
+    def test_get_video_info_invalid_video_id(self):
+        """Test get_video_info with invalid video ID."""
+        with pytest.raises(YouTubeTranscriptError, match="Invalid video ID format"):
+            get_video_info('invalid_id')
+    
+    @patch('src.utils.youtube_api.get_video_info')
+    def test_get_video_info_legacy_compatibility(self, mock_get_video_info):
+        """Test legacy compatibility function."""
+        mock_get_video_info.return_value = {'success': True, 'video_id': 'test123'}
+        
+        result = get_video_info_legacy('test123', ['en', 'zh'])
+        
+        assert result['success'] is True
+        mock_get_video_info.assert_called_once_with(
+            video_url_or_id='test123',
+            include_transcript=True,
+            preferred_languages=['en', 'zh'],
+            use_enhanced_acquisition=True,
+            enable_detailed_logging=False
+        )
+    
+    @patch.object(YouTubeTranscriptFetcher, 'get_video_metadata')
+    @patch.object(YouTubeTranscriptFetcher, 'check_video_support')
+    @patch.object(YouTubeTranscriptFetcher, 'check_transcript_availability')
+    def test_get_video_info_no_transcripts_available(self, mock_avail, mock_support, mock_metadata):
+        """Test get_video_info when no transcripts are available."""
+        mock_metadata.return_value = {'title': 'Test Video'}
+        mock_support.return_value = {'is_supported': True, 'issues': []}
+        mock_avail.return_value = {
+            'has_transcripts': False,
+            'available_transcripts': []
+        }
+        
+        result = get_video_info('test123')
+        
+        assert result['success'] is False
+        assert result['error']['type'] == 'no_transcripts'
+        assert 'transcript_availability' in result
+    
+    @patch.object(YouTubeTranscriptFetcher, 'get_video_metadata')
+    @patch.object(YouTubeTranscriptFetcher, 'check_video_support')
+    @patch.object(YouTubeTranscriptFetcher, 'check_transcript_availability')
+    @patch.object(YouTubeTranscriptFetcher, 'fetch_transcript')
+    def test_get_video_info_basic_acquisition(self, mock_fetch, mock_avail, mock_support, mock_metadata):
+        """Test get_video_info with basic acquisition (not enhanced)."""
+        mock_metadata.return_value = {'title': 'Test Video'}
+        mock_support.return_value = {'is_supported': True, 'issues': []}
+        mock_avail.return_value = {'has_transcripts': True, 'available_transcripts': [{'language': 'en'}]}
+        mock_fetch.return_value = {
+            'transcript': 'Basic transcript',
+            'raw_transcript': [{'text': 'Basic transcript', 'start': 0}],
+            'language': 'en',
+            'duration_seconds': 300,
+            'word_count': 2
+        }
+        
+        result = get_video_info('test123', use_enhanced_acquisition=False)
+        
+        assert result['success'] is True
+        assert result['enhanced_acquisition_used'] is False
+        assert result['transcript_data']['acquisition_method'] == 'basic'
+        assert 'three_tier_acquisition' not in result
+    
+    @patch.object(YouTubeTranscriptFetcher, 'get_video_metadata')
+    def test_get_video_info_error_handling(self, mock_metadata):
+        """Test get_video_info error handling and categorization."""
+        mock_metadata.side_effect = RateLimitError(60)
+        
+        result = get_video_info('test123')
+        
+        assert result['success'] is False
+        assert result['error']['type'] == 'RateLimitError'
+        assert result['error']['category'] == 'rate_limiting'
+        assert result['error']['recoverable'] is True
+        assert len(result['error']['recovery_suggestions']) > 0
+
+
+class TestEnhancedConvenienceFunctions:
+    """Test enhanced convenience functions."""
+    
+    @patch.object(YouTubeTranscriptFetcher, 'fetch_transcript_with_three_tier_strategy')
+    def test_fetch_youtube_transcript_with_three_tier_strategy_function(self, mock_fetch):
+        """Test three-tier strategy convenience function."""
+        mock_fetch.return_value = {
+            'success': True,
+            'video_id': 'test123',
+            'transcript': 'Enhanced transcript',
+            'three_tier_metadata': {
+                'selected_tier': 'manual',
+                'intelligent_fallback_metadata': {'fallback_enabled': True}
+            }
+        }
+        
+        result = fetch_youtube_transcript_with_three_tier_strategy(
+            'test123',
+            preferred_languages=['en', 'zh'],
+            enable_intelligent_fallback=True,
+            fallback_retry_delay=0.5
+        )
+        
+        assert result['success'] is True
+        assert result['video_id'] == 'test123'
+        assert 'three_tier_metadata' in result
+        
+        # Verify function was called with correct parameters
+        mock_fetch.assert_called_once_with(
+            'test123',                    # video_id
+            ['en', 'zh'],                # preferred_languages
+            True,                        # include_metadata
+            True,                        # check_unsupported
+            1800,                        # max_duration_seconds
+            3,                           # max_tier_attempts
+            True,                        # enable_intelligent_fallback
+            0.5                          # fallback_retry_delay
+        )

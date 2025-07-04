@@ -235,9 +235,13 @@ class YouTubeTranscriptNode(BaseProcessingNode):
     including video validation, metadata extraction, and error handling.
     """
     
-    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0):
+    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0, 
+                 enable_enhanced_acquisition: bool = True, enable_detailed_logging: bool = True):
         super().__init__("YouTubeTranscriptNode", max_retries, retry_delay)
-        self.transcript_fetcher = YouTubeTranscriptFetcher()
+        self.transcript_fetcher = YouTubeTranscriptFetcher(
+            enable_detailed_logging=enable_detailed_logging
+        )
+        self.enable_enhanced_acquisition = enable_enhanced_acquisition
     
     def prep(self, store: Store) -> Dict[str, Any]:
         """
@@ -332,14 +336,28 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Fetch transcript with metadata
-                transcript_data = self.transcript_fetcher.fetch_transcript(
-                    video_id=video_id,
-                    languages=['en'],
-                    include_metadata=True,
-                    check_unsupported=False,
-                    max_duration_seconds=1800
-                )
+                # Choose acquisition method based on configuration
+                if self.enable_enhanced_acquisition:
+                    # Use enhanced three-tier strategy with intelligent fallback
+                    transcript_data = self.transcript_fetcher.fetch_transcript_with_three_tier_strategy(
+                        video_id=video_id,
+                        preferred_languages=None,  # Auto-detect from video metadata
+                        include_metadata=True,
+                        check_unsupported=False,  # Already checked in prep phase
+                        max_duration_seconds=1800,
+                        max_tier_attempts=3,
+                        enable_intelligent_fallback=True,
+                        fallback_retry_delay=1.0
+                    )
+                else:
+                    # Fallback to basic transcript acquisition
+                    transcript_data = self.transcript_fetcher.fetch_transcript(
+                        video_id=video_id,
+                        languages=['en'],
+                        include_metadata=True,
+                        check_unsupported=False,
+                        max_duration_seconds=1800
+                    )
                 
                 exec_result = {
                     'exec_status': 'success',
@@ -351,7 +369,9 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                     'transcript_word_count': transcript_data['word_count'],
                     'video_metadata': transcript_data.get('video_metadata', {}),
                     'exec_timestamp': datetime.utcnow().isoformat(),
-                    'retry_count': retry_count
+                    'retry_count': retry_count,
+                    'acquisition_method': 'enhanced_three_tier' if self.enable_enhanced_acquisition else 'basic',
+                    'three_tier_metadata': transcript_data.get('three_tier_metadata', {}) if self.enable_enhanced_acquisition else None
                 }
                 
                 self.logger.info(f"Transcript execution successful for video {video_id}")
@@ -399,7 +419,7 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             # Calculate additional metrics
             transcript_stats = self._calculate_transcript_stats(transcript_text)
             
-            # Prepare store data
+            # Prepare store data with enhanced metadata
             store_data = {
                 'transcript_data': {
                     'video_id': video_id,
@@ -408,7 +428,8 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                     'language': exec_result['transcript_language'],
                     'duration_seconds': exec_result['transcript_duration'],
                     'word_count': exec_result['transcript_word_count'],
-                    'stats': transcript_stats
+                    'stats': transcript_stats,
+                    'acquisition_method': exec_result.get('acquisition_method', 'unknown')
                 },
                 'video_metadata': video_metadata,
                 'processing_metadata': {
@@ -417,9 +438,25 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                         prep_result.get('prep_timestamp', ''),
                         exec_result.get('exec_timestamp', '')
                     ),
-                    'retry_count': exec_result.get('retry_count', 0)
+                    'retry_count': exec_result.get('retry_count', 0),
+                    'acquisition_method': exec_result.get('acquisition_method', 'unknown')
                 }
             }
+            
+            # Add three-tier metadata if available
+            three_tier_metadata = exec_result.get('three_tier_metadata')
+            if three_tier_metadata:
+                store_data['three_tier_acquisition'] = {
+                    'selected_tier': three_tier_metadata.get('selected_tier'),
+                    'selected_language': three_tier_metadata.get('selected_language'),
+                    'quality_score': three_tier_metadata.get('quality_score'),
+                    'total_attempts': three_tier_metadata.get('total_attempts', 0),
+                    'strategy_options': three_tier_metadata.get('strategy_options', 0),
+                    'tier_summary': three_tier_metadata.get('tier_summary', {}),
+                    'intelligent_fallback_used': three_tier_metadata.get('intelligent_fallback_metadata', {}).get('fallback_enabled', False),
+                    'tiers_tried': three_tier_metadata.get('intelligent_fallback_metadata', {}).get('tiers_tried', []),
+                    'attempts_made': three_tier_metadata.get('attempts_made', [])
+                }
             
             # Update store
             self._safe_store_update(store, store_data)
@@ -431,8 +468,20 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                 'transcript_length': len(transcript_text),
                 'video_title': video_metadata.get('title', 'Unknown'),
                 'video_duration': video_metadata.get('duration_seconds', 0),
+                'transcript_language': exec_result['transcript_language'],
+                'acquisition_method': exec_result.get('acquisition_method', 'unknown'),
                 'post_timestamp': datetime.utcnow().isoformat()
             }
+            
+            # Add three-tier specific information to post result
+            if three_tier_metadata:
+                post_result.update({
+                    'selected_tier': three_tier_metadata.get('selected_tier'),
+                    'quality_score': three_tier_metadata.get('quality_score'),
+                    'total_attempts': three_tier_metadata.get('total_attempts', 0),
+                    'intelligent_fallback_used': three_tier_metadata.get('intelligent_fallback_metadata', {}).get('fallback_enabled', False),
+                    'tiers_available': len(three_tier_metadata.get('tier_summary', {}).get('tiers', {}))
+                })
             
             self.logger.info(f"Transcript post-processing successful for video {video_id}")
             return post_result
