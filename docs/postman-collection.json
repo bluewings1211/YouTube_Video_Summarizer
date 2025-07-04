@@ -1,0 +1,518 @@
+{
+  "info": {
+    "name": "YouTube Summarizer API",
+    "description": "AI-powered YouTube video summarization service with timestamps and keyword extraction",
+    "version": "1.0.0",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "api_version",
+      "value": "v1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Summarization",
+      "item": [
+        {
+          "name": "Summarize YouTube Video",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"youtube_url\": \"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/{{api_version}}/summarize",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "{{api_version}}",
+                "summarize"
+              ]
+            },
+            "description": "Extract transcript, generate summary, timestamps, and keywords from a YouTube video"
+          },
+          "response": [
+            {
+              "name": "Success Response",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"youtube_url\": \"https://www.youtube.com/watch?v=dQw4w9WgXcQ\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/{{api_version}}/summarize",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "{{api_version}}",
+                    "summarize"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "X-Process-Time",
+                  "value": "3.240"
+                },
+                {
+                  "key": "X-Request-ID",
+                  "value": "req_1642234200000"
+                }
+              ],
+              "body": "{\n    \"video_id\": \"dQw4w9WgXcQ\",\n    \"title\": \"Rick Astley - Never Gonna Give You Up (Official Music Video)\",\n    \"duration\": 213,\n    \"summary\": \"This music video features Rick Astley performing his iconic hit song 'Never Gonna Give You Up.' The video showcases classic 80s aesthetics with Rick's distinctive deep voice and dance moves. The song has become a cultural phenomenon, particularly associated with the internet meme known as 'Rickrolling.' The video demonstrates the production values and style typical of 1980s music videos, with its simple set design and focus on the artist's performance.\",\n    \"timestamped_segments\": [\n        {\n            \"timestamp\": \"00:00:45\",\n            \"url\": \"https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=45s\",\n            \"description\": \"Main chorus begins with the iconic hook\",\n            \"importance_rating\": 10\n        },\n        {\n            \"timestamp\": \"00:01:30\",\n            \"url\": \"https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s\",\n            \"description\": \"Dance sequence showcasing 80s choreography\",\n            \"importance_rating\": 7\n        }\n    ],\n    \"keywords\": [\n        \"Rick Astley\",\n        \"Never Gonna Give You Up\",\n        \"80s music\",\n        \"pop music\",\n        \"music video\"\n    ],\n    \"processing_time\": 3.24\n}"
+            },
+            {
+              "name": "Invalid URL Error",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"youtube_url\": \"https://example.com/invalid-url\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/{{api_version}}/summarize",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "{{api_version}}",
+                    "summarize"
+                  ]
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n    \"error\": {\n        \"code\": \"E1001\",\n        \"category\": \"validation\",\n        \"severity\": \"medium\",\n        \"title\": \"Invalid YouTube URL Format\",\n        \"message\": \"The provided URL is not a valid YouTube video URL\",\n        \"suggested_actions\": [\n            \"Check URL format\",\n            \"Ensure URL starts with https://www.youtube.com/watch or https://youtu.be/\",\n            \"Try again\"\n        ],\n        \"is_recoverable\": true,\n        \"timestamp\": \"2024-01-15T10:30:00Z\"\n    }\n}"
+            },
+            {
+              "name": "Video Not Found Error",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"youtube_url\": \"https://www.youtube.com/watch?v=NONEXISTENT\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/{{api_version}}/summarize",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "{{api_version}}",
+                    "summarize"
+                  ]
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n    \"error\": {\n        \"code\": \"E2001\",\n        \"category\": \"content\",\n        \"severity\": \"medium\",\n        \"title\": \"Video Not Found\",\n        \"message\": \"The requested video could not be found or is not accessible\",\n        \"suggested_actions\": [\n            \"Check video URL\",\n            \"Ensure video is public\",\n            \"Try a different video\"\n        ],\n        \"is_recoverable\": true,\n        \"timestamp\": \"2024-01-15T10:30:00Z\"\n    }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Test with Short URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"youtube_url\": \"https://youtu.be/dQw4w9WgXcQ\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/{{api_version}}/summarize",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "{{api_version}}",
+                "summarize"
+              ]
+            },
+            "description": "Test summarization with short YouTube URL format"
+          }
+        },
+        {
+          "name": "Test with Timestamp URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"youtube_url\": \"https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/{{api_version}}/summarize",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "{{api_version}}",
+                "summarize"
+              ]
+            },
+            "description": "Test summarization with URL containing timestamp parameter"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health & Monitoring",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Check the health status of the API service"
+          },
+          "response": [
+            {
+              "name": "Healthy Service",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/health",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "health"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n    \"status\": \"healthy\",\n    \"timestamp\": \"2024-01-15T10:30:00Z\",\n    \"version\": \"1.0.0\",\n    \"workflow_ready\": true\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Metrics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/metrics",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "description": "Get application metrics for monitoring"
+          },
+          "response": [
+            {
+              "name": "Metrics Response",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/metrics",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "metrics"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n    \"uptime_seconds\": 3600,\n    \"timestamp\": \"2024-01-15T10:30:00Z\",\n    \"version\": \"1.0.0\",\n    \"workflow_status\": {\n        \"initialized\": true,\n        \"ready\": true\n    }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "API Information",
+      "item": [
+        {
+          "name": "Root Information",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": "Get basic API information and available endpoints"
+          },
+          "response": [
+            {
+              "name": "API Information",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    ""
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n    \"service\": \"YouTube Summarizer\",\n    \"version\": \"1.0.0\",\n    \"description\": \"AI-powered YouTube video summarization service\",\n    \"endpoints\": {\n        \"summarize\": \"/api/v1/summarize\",\n        \"health\": \"/health\",\n        \"docs\": \"/api/docs\"\n    },\n    \"timestamp\": \"2024-01-15T10:30:00Z\"\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Set request timestamp for tracking",
+          "pm.globals.set('request_timestamp', new Date().toISOString());"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Common test suite for all requests",
+          "",
+          "// Test response time",
+          "pm.test('Response time is reasonable', function () {",
+          "    pm.expect(pm.response.responseTime).to.be.below(30000); // 30 seconds max",
+          "});",
+          "",
+          "// Test content type",
+          "pm.test('Content-Type is application/json', function () {",
+          "    pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');",
+          "});",
+          "",
+          "// Test for request ID header",
+          "pm.test('Request ID header present', function () {",
+          "    pm.expect(pm.response.headers.get('X-Request-ID')).to.exist;",
+          "});",
+          "",
+          "// Test response structure based on status code",
+          "if (pm.response.code === 200) {",
+          "    pm.test('Success response has valid structure', function () {",
+          "        const response = pm.response.json();",
+          "        ",
+          "        // Check if it's a summarization response",
+          "        if (response.video_id) {",
+          "            pm.expect(response).to.have.property('video_id');",
+          "            pm.expect(response).to.have.property('title');",
+          "            pm.expect(response).to.have.property('duration');",
+          "            pm.expect(response).to.have.property('summary');",
+          "            pm.expect(response).to.have.property('timestamped_segments');",
+          "            pm.expect(response).to.have.property('keywords');",
+          "            pm.expect(response).to.have.property('processing_time');",
+          "        }",
+          "        ",
+          "        // Check if it's a health response",
+          "        if (response.status) {",
+          "            pm.expect(response).to.have.property('status');",
+          "            pm.expect(response).to.have.property('timestamp');",
+          "            pm.expect(response).to.have.property('version');",
+          "        }",
+          "    });",
+          "} else {",
+          "    pm.test('Error response has valid structure', function () {",
+          "        const response = pm.response.json();",
+          "        pm.expect(response).to.have.property('error');",
+          "        pm.expect(response.error).to.have.property('code');",
+          "        pm.expect(response.error).to.have.property('message');",
+          "        pm.expect(response.error).to.have.property('category');",
+          "        pm.expect(response.error).to.have.property('severity');",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ]
+}
