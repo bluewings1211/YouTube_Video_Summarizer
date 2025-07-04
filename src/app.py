@@ -22,11 +22,21 @@ from uvicorn import run
 try:
     from .flow import YouTubeSummarizerFlow, WorkflowError
     from .config import settings
+    from .utils.error_messages import (
+        ErrorMessageProvider, ErrorCode, ErrorCategory, ErrorSeverity,
+        get_youtube_error, get_llm_error, get_network_error
+    )
+    from .utils.validators import validate_youtube_url_detailed, URLValidationResult
 except ImportError:
     # For testing - try absolute imports
     try:
         from flow import YouTubeSummarizerFlow, WorkflowError
         from config import settings
+        from utils.error_messages import (
+            ErrorMessageProvider, ErrorCode, ErrorCategory, ErrorSeverity,
+            get_youtube_error, get_llm_error, get_network_error
+        )
+        from utils.validators import validate_youtube_url_detailed, URLValidationResult
     except ImportError:
         # Create mock implementations for testing
         class YouTubeSummarizerFlow:
@@ -46,6 +56,29 @@ except ImportError:
                 self.log_level = "info"
         
         settings = MockSettings()
+        
+        # Mock error handling classes
+        class ErrorMessageProvider:
+            @classmethod
+            def get_error_details(cls, error_code, **kwargs):
+                return None
+            @classmethod
+            def format_error_response(cls, error_details, **kwargs):
+                return {"error": "Mock error"}
+        
+        class ErrorCode:
+            INVALID_URL_FORMAT = "E1001"
+        
+        def validate_youtube_url_detailed(url):
+            class MockResult:
+                is_valid = True
+                result_type = None
+                error_message = None
+            return MockResult()
+        
+        def get_youtube_error(msg, vid=""): return None
+        def get_llm_error(msg, prov=""): return None
+        def get_network_error(msg, url=""): return None
 
 # Configure logging
 logging.basicConfig(
@@ -175,29 +208,17 @@ class SummarizeRequest(BaseModel):
     
     @validator('youtube_url')
     def validate_youtube_url(cls, v):
-        """Validate YouTube URL format."""
-        if not v or not isinstance(v, str):
-            raise ValueError("YouTube URL must be a non-empty string")
+        """Validate YouTube URL format using enhanced validation."""
+        # Use the enhanced validation system
+        validation_result = validate_youtube_url_detailed(v)
         
-        v = v.strip()
+        if not validation_result.is_valid:
+            # Create detailed error using the error message provider
+            error_details = ErrorMessageProvider.create_validation_error(validation_result, str(v))
+            # Raise ValueError with user-friendly message
+            raise ValueError(error_details.user_message)
         
-        # Basic YouTube URL validation
-        valid_patterns = [
-            'youtube.com/watch?v=',
-            'youtu.be/',
-            'youtube.com/embed/',
-            'youtube.com/v/',
-            'youtube.com/watch?',
-            'youtube.com/shorts/'
-        ]
-        
-        if not any(pattern in v.lower() for pattern in valid_patterns):
-            raise ValueError("Invalid YouTube URL format")
-        
-        if len(v) > 1000:  # Reasonable URL length limit
-            raise ValueError("YouTube URL too long")
-        
-        return v
+        return v.strip()
 
 class TimestampedSegment(BaseModel):
     """Model for timestamped video segments."""
@@ -263,68 +284,114 @@ class SummarizeResponse(BaseModel):
     )
 
 class ErrorResponse(BaseModel):
-    """Error response model."""
-    error: str = Field(
+    """Enhanced error response model with detailed error information."""
+    error: Dict[str, Any] = Field(
         ...,
-        description="Error code",
-        example="UNSUPPORTED_VIDEO_TYPE"
-    )
-    message: str = Field(
-        ...,
-        description="Human-readable error message",
-        example="This video type is not supported"
-    )
-    details: Optional[Dict[str, Any]] = Field(
-        None,
-        description="Additional error details"
-    )
-    timestamp: str = Field(
-        ...,
-        description="Error timestamp",
-        example="2024-01-15T10:30:00Z"
+        description="Detailed error information",
+        example={
+            "code": "E1001",
+            "category": "validation",
+            "severity": "medium",
+            "title": "Invalid YouTube URL Format",
+            "message": "Please provide a valid YouTube video URL",
+            "suggested_actions": ["Check URL format", "Try again"],
+            "is_recoverable": True,
+            "timestamp": "2024-01-15T10:30:00Z"
+        }
     )
 
-# Custom exception handler
+# Enhanced exception handlers using standardized error messages
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Custom HTTP exception handler."""
-    logger.error(f"HTTP {exc.status_code} error: {exc.detail}")
+    """Enhanced HTTP exception handler with detailed error information."""
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    logger.error(f"[{request_id}] HTTP {exc.status_code} error: {exc.detail}")
+    
+    # Try to map HTTP errors to our error codes
+    error_code = ErrorCode.INTERNAL_SERVER_ERROR
+    if exc.status_code == 400:
+        error_code = ErrorCode.INVALID_URL_FORMAT
+    elif exc.status_code == 404:
+        error_code = ErrorCode.VIDEO_NOT_FOUND
+    elif exc.status_code == 408:
+        error_code = ErrorCode.REQUEST_TIMEOUT
+    elif exc.status_code == 429:
+        error_code = ErrorCode.LLM_RATE_LIMITED
+    elif exc.status_code == 503:
+        error_code = ErrorCode.SERVICE_UNAVAILABLE
+    
+    error_details = ErrorMessageProvider.get_error_details(
+        error_code=error_code,
+        additional_context=str(exc.detail),
+        technical_details=f"HTTP {exc.status_code}: {exc.detail}"
+    )
+    
+    response_content = ErrorMessageProvider.format_error_response(
+        error_details=error_details,
+        include_technical_details=False
+    )
     
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "error": f"HTTP_{exc.status_code}",
-            "message": exc.detail,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
+        content=response_content
     )
 
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
-    """Custom ValueError handler."""
-    logger.error(f"Validation error: {str(exc)}")
+    """Enhanced ValueError handler with detailed error information."""
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    logger.error(f"[{request_id}] Validation error: {str(exc)}")
+    
+    # Try to determine the specific validation error
+    error_message = str(exc)
+    error_code = ErrorMessageProvider.get_error_by_pattern(error_message)
+    
+    if not error_code:
+        error_code = ErrorCode.INVALID_URL_FORMAT  # Default for validation errors
+    
+    error_details = ErrorMessageProvider.get_error_details(
+        error_code=error_code,
+        additional_context=error_message,
+        technical_details=f"ValueError: {error_message}"
+    )
+    
+    response_content = ErrorMessageProvider.format_error_response(
+        error_details=error_details,
+        include_technical_details=False
+    )
     
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content={
-            "error": "VALIDATION_ERROR",
-            "message": str(exc),
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
+        content=response_content
     )
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """General exception handler."""
-    logger.error(f"Unexpected error: {str(exc)}", exc_info=True)
+    """Enhanced general exception handler with detailed error information."""
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    logger.error(f"[{request_id}] Unexpected error: {str(exc)}", exc_info=True)
+    
+    # Try to categorize the error
+    error_message = str(exc)
+    error_code = ErrorMessageProvider.get_error_by_pattern(error_message)
+    
+    if not error_code:
+        error_code = ErrorCode.INTERNAL_SERVER_ERROR
+    
+    error_details = ErrorMessageProvider.get_error_details(
+        error_code=error_code,
+        additional_context=error_message,
+        technical_details=f"{type(exc).__name__}: {error_message}"
+    )
+    
+    response_content = ErrorMessageProvider.format_error_response(
+        error_details=error_details,
+        include_technical_details=False
+    )
     
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={
-            "error": "INTERNAL_SERVER_ERROR",
-            "message": "An unexpected error occurred",
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
+        content=response_content
     )
 
 # Health check endpoint
@@ -426,9 +493,14 @@ async def summarize_video(request: SummarizeRequest, http_request: Request):
         # Validate workflow instance is available
         if workflow_instance is None:
             logger.error(f"[{request_id}] Workflow instance not initialized")
-            raise HTTPException(
+            error_details = ErrorMessageProvider.get_error_details(
+                error_code=ErrorCode.SERVICE_UNAVAILABLE,
+                technical_details="Workflow engine not initialized"
+            )
+            response_content = ErrorMessageProvider.format_error_response(error_details)
+            return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Service temporarily unavailable - workflow engine not ready"
+                content=response_content
             )
         
         # Prepare input data for workflow
@@ -451,65 +523,102 @@ async def summarize_video(request: SummarizeRequest, http_request: Request):
             if isinstance(workflow_error, WorkflowError):
                 return await handle_workflow_error(workflow_error, request_id)
             
-            # Handle general workflow errors
+            # Handle general workflow errors using standardized error messages
             error_message = str(workflow_error)
             
-            # Check for specific error patterns
-            if "private" in error_message.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Private videos cannot be processed"
-                )
-            elif "live" in error_message.lower() or "stream" in error_message.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Live streams cannot be processed"
-                )
-            elif "transcript" in error_message.lower() and "not" in error_message.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Video transcripts are not available"
-                )
-            elif "duration" in error_message.lower() or "long" in error_message.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Video exceeds maximum duration limit (30 minutes)"
-                )
-            elif "invalid" in error_message.lower() or "not found" in error_message.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid YouTube URL or video not found"
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Internal processing error occurred"
-                )
+            # Determine appropriate error code based on error message patterns
+            error_code = ErrorMessageProvider.get_error_by_pattern(error_message)
+            
+            # If no pattern match, try specific error classifications
+            if not error_code:
+                if "private" in error_message.lower():
+                    error_code = ErrorCode.VIDEO_PRIVATE
+                elif "live" in error_message.lower() or "stream" in error_message.lower():
+                    error_code = ErrorCode.VIDEO_LIVE_STREAM
+                elif "transcript" in error_message.lower() and "not" in error_message.lower():
+                    error_code = ErrorCode.NO_TRANSCRIPT_AVAILABLE
+                elif "duration" in error_message.lower() or "long" in error_message.lower():
+                    error_code = ErrorCode.VIDEO_TOO_LONG
+                elif "invalid" in error_message.lower() or "not found" in error_message.lower():
+                    error_code = ErrorCode.VIDEO_NOT_FOUND
+                elif "timeout" in error_message.lower():
+                    error_code = ErrorCode.PROCESSING_TIMEOUT
+                elif "network" in error_message.lower() or "connection" in error_message.lower():
+                    error_code = ErrorCode.CONNECTION_FAILED
+                else:
+                    error_code = ErrorCode.WORKFLOW_EXECUTION_FAILED
+            
+            # Get detailed error information
+            error_details = ErrorMessageProvider.get_error_details(
+                error_code=error_code,
+                additional_context=error_message,
+                technical_details=f"Workflow error: {error_message}"
+            )
+            
+            # Determine appropriate HTTP status code
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            if error_details.category == ErrorCategory.VALIDATION:
+                status_code = status.HTTP_400_BAD_REQUEST
+            elif error_details.category == ErrorCategory.YOUTUBE_API:
+                status_code = status.HTTP_400_BAD_REQUEST
+            elif error_details.category == ErrorCategory.TIMEOUT:
+                status_code = status.HTTP_408_REQUEST_TIMEOUT
+            elif error_details.category == ErrorCategory.RATE_LIMIT:
+                status_code = status.HTTP_429_TOO_MANY_REQUESTS
+            elif error_details.category == ErrorCategory.NETWORK:
+                status_code = status.HTTP_502_BAD_GATEWAY
+            
+            response_content = ErrorMessageProvider.format_error_response(error_details)
+            return JSONResponse(
+                status_code=status_code,
+                content=response_content
+            )
         
         # Check workflow execution result
         if workflow_result.get('status') == 'failed':
             logger.error(f"[{request_id}] Workflow failed: {workflow_result.get('error', {}).get('message', 'Unknown error')}")
             error_info = workflow_result.get('error', {})
             
-            # Map workflow errors to HTTP errors
+            # Extract error information
             error_type = error_info.get('type', 'Unknown')
             error_message = error_info.get('message', 'Workflow execution failed')
             
-            if 'validation' in error_type.lower() or 'invalid' in error_message.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=error_message
-                )
-            elif 'timeout' in error_type.lower() or 'timeout' in error_message.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_408_REQUEST_TIMEOUT,
-                    detail="Request processing timeout"
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Processing failed due to internal error"
-                )
+            # Determine appropriate error code
+            error_code = ErrorMessageProvider.get_error_by_pattern(error_message)
+            
+            if not error_code:
+                if 'validation' in error_type.lower() or 'invalid' in error_message.lower():
+                    error_code = ErrorCode.INVALID_URL_FORMAT
+                elif 'timeout' in error_type.lower() or 'timeout' in error_message.lower():
+                    error_code = ErrorCode.PROCESSING_TIMEOUT
+                elif 'transcript' in error_message.lower():
+                    error_code = ErrorCode.NO_TRANSCRIPT_AVAILABLE
+                elif 'youtube' in error_message.lower():
+                    error_code = ErrorCode.VIDEO_NOT_FOUND
+                else:
+                    error_code = ErrorCode.WORKFLOW_EXECUTION_FAILED
+            
+            # Create detailed error information
+            error_details = ErrorMessageProvider.get_error_details(
+                error_code=error_code,
+                additional_context=error_message,
+                technical_details=f"Workflow result error: {error_type} - {error_message}"
+            )
+            
+            # Determine HTTP status code
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            if error_details.category == ErrorCategory.VALIDATION:
+                status_code = status.HTTP_400_BAD_REQUEST
+            elif error_details.category == ErrorCategory.YOUTUBE_API:
+                status_code = status.HTTP_400_BAD_REQUEST
+            elif error_details.category == ErrorCategory.TIMEOUT:
+                status_code = status.HTTP_408_REQUEST_TIMEOUT
+            
+            response_content = ErrorMessageProvider.format_error_response(error_details)
+            return JSONResponse(
+                status_code=status_code,
+                content=response_content
+            )
         
         # Extract data from workflow result
         workflow_data = workflow_result.get('data', {})
@@ -576,45 +685,82 @@ async def summarize_video(request: SummarizeRequest, http_request: Request):
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        # Handle unexpected errors
+        # Handle unexpected errors with detailed error information
         logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
-        raise HTTPException(
+        
+        error_details = ErrorMessageProvider.get_error_details(
+            error_code=ErrorCode.INTERNAL_SERVER_ERROR,
+            additional_context=str(e),
+            technical_details=f"Unexpected error in summarize_video: {type(e).__name__}: {str(e)}"
+        )
+        
+        response_content = ErrorMessageProvider.format_error_response(error_details)
+        return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred during processing"
+            content=response_content
         )
 
 async def handle_workflow_error(workflow_error: WorkflowError, request_id: str) -> JSONResponse:
-    """Handle specific workflow errors with appropriate HTTP responses."""
+    """Enhanced workflow error handler with detailed error information."""
     logger.error(f"[{request_id}] Workflow error: {workflow_error.message}")
     
-    # Map workflow errors to HTTP status codes
-    error_type = workflow_error.error_type.lower()
-    error_message = workflow_error.message
+    # Determine appropriate error code based on workflow error
+    error_code = ErrorMessageProvider.get_error_by_pattern(workflow_error.message)
     
-    if 'validation' in error_type or 'invalid' in error_message.lower():
+    if not error_code:
+        error_type = workflow_error.error_type.lower()
+        if 'validation' in error_type:
+            error_code = ErrorCode.INVALID_URL_FORMAT
+        elif 'timeout' in error_type:
+            error_code = ErrorCode.PROCESSING_TIMEOUT
+        elif 'youtube' in error_type or 'transcript' in error_type:
+            error_code = ErrorCode.VIDEO_NOT_FOUND
+        elif 'llm' in error_type or 'ai' in error_type:
+            error_code = ErrorCode.LLM_SERVICE_UNAVAILABLE
+        elif 'network' in error_type:
+            error_code = ErrorCode.CONNECTION_FAILED
+        else:
+            error_code = ErrorCode.WORKFLOW_EXECUTION_FAILED
+    
+    # Create detailed error information
+    error_details = ErrorMessageProvider.get_error_details(
+        error_code=error_code,
+        additional_context=workflow_error.message,
+        technical_details=f"Workflow error in {workflow_error.failed_node}: {workflow_error.message}"
+    )
+    
+    # Determine HTTP status code
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    if error_details.category == ErrorCategory.VALIDATION:
         status_code = status.HTTP_400_BAD_REQUEST
-    elif 'timeout' in error_type or 'timeout' in error_message.lower():
+    elif error_details.category == ErrorCategory.YOUTUBE_API:
+        status_code = status.HTTP_400_BAD_REQUEST
+    elif error_details.category == ErrorCategory.TIMEOUT:
         status_code = status.HTTP_408_REQUEST_TIMEOUT
-    elif 'not found' in error_message.lower():
-        status_code = status.HTTP_404_NOT_FOUND
-    elif 'unavailable' in error_type or 'service' in error_type:
+    elif error_details.category == ErrorCategory.RATE_LIMIT:
+        status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    elif error_details.category == ErrorCategory.NETWORK:
+        status_code = status.HTTP_502_BAD_GATEWAY
+    elif error_details.category == ErrorCategory.SERVER:
         status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    else:
-        status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    
+    # Format response with enhanced error details
+    response_content = ErrorMessageProvider.format_error_response(
+        error_details=error_details,
+        include_technical_details=False
+    )
+    
+    # Add workflow-specific details
+    response_content["error"]["workflow_details"] = {
+        "failed_node": getattr(workflow_error, 'failed_node', 'unknown'),
+        "is_recoverable": getattr(workflow_error, 'is_recoverable', True),
+        "node_phase": getattr(workflow_error, 'node_phase', 'unknown'),
+        "recovery_action": getattr(workflow_error, 'recovery_action', 'retry')
+    }
     
     return JSONResponse(
         status_code=status_code,
-        content={
-            "error": workflow_error.error_type,
-            "message": workflow_error.message,
-            "details": {
-                "failed_node": workflow_error.failed_node,
-                "is_recoverable": workflow_error.is_recoverable,
-                "node_phase": workflow_error.node_phase,
-                "recovery_action": workflow_error.recovery_action
-            },
-            "timestamp": workflow_error.timestamp
-        }
+        content=response_content
     )
 
 def convert_timestamp_to_seconds(timestamp_str: str) -> int:
