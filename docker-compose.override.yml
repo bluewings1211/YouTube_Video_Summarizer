@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  app:
+    # Override command for development with hot-reloading
+    command: python -m uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=debug
+    # Add development volume mounts
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./requirements.txt:/app/requirements.txt
+      - ./.env:/app/.env
+
+  dev-tools:
+    # Development tools for testing and debugging
+    command: |
+      sh -c "
+        echo 'Development tools container ready'
+        echo 'Available commands:'
+        echo '  - pytest: Run tests'
+        echo '  - black: Format code'
+        echo '  - flake8: Lint code'
+        echo '  - mypy: Type checking'
+        tail -f /dev/null
+      "
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=debug
