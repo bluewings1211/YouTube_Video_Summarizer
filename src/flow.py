@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional, Union, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
+from enum import Enum
 
 try:
     from pocketflow import Flow, Node, Store, FlowState
@@ -38,6 +39,48 @@ except ImportError:
         SUCCESS = "success"
         FAILED = "failed"
         PARTIAL = "partial"
+
+
+class NodeExecutionMode(Enum):
+    """Execution modes for workflow nodes."""
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"  # For future implementation
+    CONDITIONAL = "conditional"  # For future implementation
+
+
+@dataclass
+class NodeConfig:
+    """Configuration for individual nodes in the workflow."""
+    name: str
+    enabled: bool = True
+    required: bool = True
+    max_retries: int = 3
+    retry_delay: float = 1.0
+    timeout_seconds: int = 60
+    dependencies: List[str] = field(default_factory=list)
+    output_keys: List[str] = field(default_factory=list)
+    
+    
+@dataclass
+class DataFlowConfig:
+    """Configuration for data flow between nodes."""
+    input_mapping: Dict[str, str] = field(default_factory=dict)
+    output_mapping: Dict[str, str] = field(default_factory=dict)
+    data_validation: Dict[str, Any] = field(default_factory=dict)
+    cleanup_keys: List[str] = field(default_factory=list)
+    
+    
+@dataclass
+class WorkflowConfig:
+    """Complete workflow configuration."""
+    execution_mode: NodeExecutionMode = NodeExecutionMode.SEQUENTIAL
+    node_configs: Dict[str, NodeConfig] = field(default_factory=dict)
+    data_flow_config: DataFlowConfig = field(default_factory=DataFlowConfig)
+    enable_monitoring: bool = True
+    enable_fallbacks: bool = True
+    max_retries: int = 2
+    timeout_seconds: int = 300
+    store_cleanup: bool = True
 
 from .nodes import (
     YouTubeTranscriptNode,
@@ -84,6 +127,7 @@ class YouTubeSummarizerFlow(Flow):
     """
     
     def __init__(self, 
+                 config: Optional[WorkflowConfig] = None,
                  enable_monitoring: bool = True,
                  enable_fallbacks: bool = True,
                  max_retries: int = 2,
@@ -92,71 +136,272 @@ class YouTubeSummarizerFlow(Flow):
         Initialize the YouTube summarizer workflow.
         
         Args:
-            enable_monitoring: Whether to enable performance monitoring
-            enable_fallbacks: Whether to enable fallback mechanisms
-            max_retries: Maximum number of workflow retries
-            timeout_seconds: Total workflow timeout in seconds
+            config: Complete workflow configuration (preferred)
+            enable_monitoring: Whether to enable performance monitoring (legacy)
+            enable_fallbacks: Whether to enable fallback mechanisms (legacy)
+            max_retries: Maximum number of workflow retries (legacy)
+            timeout_seconds: Total workflow timeout in seconds (legacy)
         """
         super().__init__("YouTubeSummarizerFlow")
         
-        self.enable_monitoring = enable_monitoring
-        self.enable_fallbacks = enable_fallbacks
-        self.max_retries = max_retries
-        self.timeout_seconds = timeout_seconds
+        # Initialize configuration
+        if config:
+            self.config = config
+        else:
+            # Create default config from legacy parameters
+            self.config = self._create_default_config(
+                enable_monitoring, enable_fallbacks, max_retries, timeout_seconds
+            )
         
-        # Initialize metrics
+        # Extract commonly used config values
+        self.enable_monitoring = self.config.enable_monitoring
+        self.enable_fallbacks = self.config.enable_fallbacks
+        self.max_retries = self.config.max_retries
+        self.timeout_seconds = self.config.timeout_seconds
+        
+        # Initialize metrics and tracking
         self.metrics = None
         self.workflow_errors: List[WorkflowError] = []
+        self.node_instances: Dict[str, Node] = {}
         
-        # Initialize nodes
-        self._initialize_nodes()
+        # Initialize nodes with configuration
+        self._initialize_configured_nodes()
         
         # Setup monitoring
         if self.enable_monitoring:
             self._setup_monitoring()
         
-        logger.info(f"YouTubeSummarizerFlow initialized with {len(self.nodes)} nodes")
+        logger.info(f"YouTubeSummarizerFlow initialized with {len(self.nodes)} nodes (config: {self.config.execution_mode.value})")
     
-    def _initialize_nodes(self) -> None:
-        """Initialize all processing nodes in the correct order."""
+    def _create_default_config(
+        self, 
+        enable_monitoring: bool, 
+        enable_fallbacks: bool, 
+        max_retries: int, 
+        timeout_seconds: int
+    ) -> WorkflowConfig:
+        """Create default workflow configuration from legacy parameters."""
+        
+        # Default node configurations
+        node_configs = {
+            'YouTubeTranscriptNode': NodeConfig(
+                name='YouTubeTranscriptNode',
+                enabled=True,
+                required=True,
+                max_retries=3,
+                retry_delay=1.0,
+                timeout_seconds=60,
+                dependencies=[],
+                output_keys=['transcript_data', 'video_metadata']
+            ),
+            'SummarizationNode': NodeConfig(
+                name='SummarizationNode',
+                enabled=True,
+                required=True,
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=120,
+                dependencies=['YouTubeTranscriptNode'],
+                output_keys=['summary_data', 'summary_metadata']
+            ),
+            'TimestampNode': NodeConfig(
+                name='TimestampNode',
+                enabled=True,
+                required=False,  # Optional for graceful degradation
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=90,
+                dependencies=['YouTubeTranscriptNode'],
+                output_keys=['timestamp_data', 'timestamp_metadata']
+            ),
+            'KeywordExtractionNode': NodeConfig(
+                name='KeywordExtractionNode',
+                enabled=True,
+                required=False,  # Optional for graceful degradation
+                max_retries=3,
+                retry_delay=1.5,
+                timeout_seconds=60,
+                dependencies=['YouTubeTranscriptNode'],
+                output_keys=['keyword_data', 'keyword_metadata']
+            )
+        }
+        
+        # Default data flow configuration
+        data_flow_config = DataFlowConfig(
+            input_mapping={
+                'youtube_url': 'youtube_url',
+                'processing_start_time': 'processing_start_time'
+            },
+            output_mapping={
+                'transcript_data': 'transcript_data',
+                'video_metadata': 'video_metadata',
+                'summary_data': 'summary_data',
+                'timestamp_data': 'timestamp_data',
+                'keyword_data': 'keyword_data'
+            },
+            data_validation={
+                'youtube_url': {'type': str, 'required': True},
+                'transcript_data': {'type': dict, 'required': True},
+                'video_metadata': {'type': dict, 'required': True}
+            },
+            cleanup_keys=['_internal_processing_state', '_temp_data']
+        )
+        
+        return WorkflowConfig(
+            execution_mode=NodeExecutionMode.SEQUENTIAL,
+            node_configs=node_configs,
+            data_flow_config=data_flow_config,
+            enable_monitoring=enable_monitoring,
+            enable_fallbacks=enable_fallbacks,
+            max_retries=max_retries,
+            timeout_seconds=timeout_seconds,
+            store_cleanup=True
+        )
+    
+    def _initialize_configured_nodes(self) -> None:
+        """Initialize nodes based on configuration."""
         try:
-            # Node 1: Fetch YouTube transcript
-            self.transcript_node = YouTubeTranscriptNode(
-                max_retries=3,
-                retry_delay=1.0
-            )
+            enabled_nodes = []
             
-            # Node 2: Generate summary
-            self.summary_node = SummarizationNode(
-                max_retries=3,
-                retry_delay=2.0
-            )
+            # Create node instances based on configuration
+            for node_name, node_config in self.config.node_configs.items():
+                if not node_config.enabled:
+                    logger.info(f"Skipping disabled node: {node_name}")
+                    continue
+                
+                node_instance = self._create_node_instance(node_name, node_config)
+                if node_instance:
+                    self.node_instances[node_name] = node_instance
+                    enabled_nodes.append(node_instance)
+                    logger.debug(f"Initialized node: {node_name}")
             
-            # Node 3: Create timestamps
-            self.timestamp_node = TimestampNode(
-                max_retries=3,
-                retry_delay=2.0
-            )
+            # Sort nodes by dependencies for execution order
+            self.nodes = self._sort_nodes_by_dependencies(enabled_nodes)
             
-            # Node 4: Extract keywords
-            self.keyword_node = KeywordExtractionNode(
-                max_retries=3,
-                retry_delay=1.5
-            )
-            
-            # Store nodes in execution order
-            self.nodes = [
-                self.transcript_node,
-                self.summary_node,
-                self.timestamp_node,
-                self.keyword_node
-            ]
-            
-            logger.info("All workflow nodes initialized successfully")
+            logger.info(f"Initialized {len(self.nodes)} nodes in configured order")
             
         except Exception as e:
-            logger.error(f"Failed to initialize workflow nodes: {str(e)}")
+            logger.error(f"Failed to initialize configured nodes: {str(e)}")
             raise
+    
+    def _create_node_instance(self, node_name: str, node_config: NodeConfig) -> Optional[Node]:
+        """Create a node instance based on configuration."""
+        try:
+            if node_name == 'YouTubeTranscriptNode':
+                return YouTubeTranscriptNode(
+                    max_retries=node_config.max_retries,
+                    retry_delay=node_config.retry_delay
+                )
+            elif node_name == 'SummarizationNode':
+                return SummarizationNode(
+                    max_retries=node_config.max_retries,
+                    retry_delay=node_config.retry_delay
+                )
+            elif node_name == 'TimestampNode':
+                return TimestampNode(
+                    max_retries=node_config.max_retries,
+                    retry_delay=node_config.retry_delay
+                )
+            elif node_name == 'KeywordExtractionNode':
+                return KeywordExtractionNode(
+                    max_retries=node_config.max_retries,
+                    retry_delay=node_config.retry_delay
+                )
+            else:
+                logger.warning(f"Unknown node type: {node_name}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to create node {node_name}: {str(e)}")
+            return None
+    
+    def _sort_nodes_by_dependencies(self, nodes: List[Node]) -> List[Node]:
+        """Sort nodes based on their dependencies."""
+        # For now, use the predefined order since all nodes are sequential
+        # In the future, this could implement topological sorting
+        
+        node_order = [
+            'YouTubeTranscriptNode',
+            'SummarizationNode', 
+            'TimestampNode',
+            'KeywordExtractionNode'
+        ]
+        
+        sorted_nodes = []
+        node_map = {node.name: node for node in nodes}
+        
+        for node_name in node_order:
+            if node_name in node_map:
+                sorted_nodes.append(node_map[node_name])
+        
+        return sorted_nodes
+    
+    def _validate_data_flow(self, current_node_name: str) -> None:
+        """Validate data flow requirements before node execution."""
+        if current_node_name not in self.config.node_configs:
+            return
+        
+        node_config = self.config.node_configs[current_node_name]
+        
+        # Check dependencies
+        for dependency in node_config.dependencies:
+            if dependency not in self.node_instances:
+                raise ValueError(f"Node {current_node_name} depends on {dependency} but it's not available")
+        
+        # Validate required data in store based on data flow config
+        data_validation = self.config.data_flow_config.data_validation
+        
+        for key, validation_rules in data_validation.items():
+            if validation_rules.get('required', False):
+                if key not in self.store:
+                    # Check if this is a dependency issue
+                    if any(dep in current_node_name for dep in node_config.dependencies):
+                        raise ValueError(f"Required data '{key}' not found in store for node {current_node_name}")
+                
+                # Type validation
+                expected_type = validation_rules.get('type')
+                if expected_type and key in self.store:
+                    actual_value = self.store[key]
+                    if not isinstance(actual_value, expected_type):
+                        raise ValueError(f"Data '{key}' has type {type(actual_value).__name__} but expected {expected_type.__name__}")
+    
+    def _cleanup_store_data(self) -> None:
+        """Clean up temporary data from store based on configuration."""
+        if not self.config.store_cleanup:
+            return
+        
+        cleanup_keys = self.config.data_flow_config.cleanup_keys
+        
+        for key in cleanup_keys:
+            if key in self.store:
+                del self.store[key]
+                logger.debug(f"Cleaned up store key: {key}")
+    
+    def _map_output_data(self, node_name: str, node_result: Dict[str, Any]) -> None:
+        """Map node output to store based on data flow configuration."""
+        if node_name not in self.config.node_configs:
+            return
+        
+        node_config = self.config.node_configs[node_name]
+        output_mapping = self.config.data_flow_config.output_mapping
+        
+        # Map configured output keys
+        for output_key in node_config.output_keys:
+            if output_key in output_mapping:
+                mapped_key = output_mapping[output_key]
+                if output_key in self.store:
+                    # Create mapped copy if different
+                    if mapped_key != output_key:
+                        self.store[mapped_key] = self.store[output_key]
+                        logger.debug(f"Mapped output {output_key} -> {mapped_key}")
+        
+        # Store node execution results for debugging
+        if self.enable_monitoring:
+            self.store[f'_node_results_{node_name}'] = {
+                'execution_time': time.time(),
+                'status': 'completed',
+                'result_keys': list(node_result.keys())
+            }
     
     def _setup_monitoring(self) -> None:
         """Setup performance monitoring for the workflow."""
@@ -269,14 +514,18 @@ class YouTubeSummarizerFlow(Flow):
         raise RuntimeError("Workflow failed after all retries")
     
     def _execute_nodes_sequence(self) -> Dict[str, Any]:
-        """Execute all nodes in the correct sequence."""
+        """Execute all nodes in the configured sequence with data flow validation."""
         results = {}
         
         for node in self.nodes:
             node_start_time = time.time()
+            node_config = self.config.node_configs.get(node.name)
             
             try:
                 logger.info(f"Executing node: {node.name}")
+                
+                # Validate data flow requirements before execution
+                self._validate_data_flow(node.name)
                 
                 # Execute node phases
                 prep_result = node.prep(self.store)
@@ -290,7 +539,30 @@ class YouTubeSummarizerFlow(Flow):
                     'post': post_result
                 }
                 
-                # Track metrics
+                # Handle node failure based on configuration
+                if post_result.get('post_status') != 'success':
+                    error_msg = post_result.get('error', 'Unknown node error')
+                    
+                    # Check if this is a required node
+                    if node_config and node_config.required:
+                        raise RuntimeError(f"Required node {node.name} failed: {error_msg}")
+                    else:
+                        # Optional node failure - log warning and continue
+                        logger.warning(f"Optional node {node.name} failed: {error_msg}")
+                        results[node.name]['status'] = 'failed_optional'
+                        
+                        # Track metrics even for failed optional nodes
+                        if self.enable_monitoring:
+                            node_duration = time.time() - node_start_time
+                            self.metrics.node_durations[node.name] = node_duration
+                            self.metrics.node_retry_counts[node.name] = exec_result.get('retry_count', 0)
+                        
+                        continue
+                
+                # Map output data based on configuration
+                self._map_output_data(node.name, post_result)
+                
+                # Track metrics for successful execution
                 if self.enable_monitoring:
                     node_duration = time.time() - node_start_time
                     self.metrics.node_durations[node.name] = node_duration
@@ -298,11 +570,6 @@ class YouTubeSummarizerFlow(Flow):
                     # Track retry count
                     retry_count = exec_result.get('retry_count', 0)
                     self.metrics.node_retry_counts[node.name] = retry_count
-                
-                # Check for node failures
-                if post_result.get('post_status') != 'success':
-                    error_msg = post_result.get('error', 'Unknown node error')
-                    raise RuntimeError(f"Node {node.name} failed: {error_msg}")
                 
                 logger.info(f"Node {node.name} completed successfully")
                 
@@ -317,7 +584,16 @@ class YouTubeSummarizerFlow(Flow):
                     'timestamp': datetime.utcnow().isoformat()
                 }
                 
-                raise RuntimeError(error_msg)
+                # Check if this is a required node
+                if node_config and node_config.required:
+                    raise RuntimeError(error_msg)
+                else:
+                    # Optional node failure - continue with warning
+                    logger.warning(f"Optional node {node.name} failed, continuing: {error_msg}")
+                    continue
+        
+        # Clean up temporary data after all nodes complete
+        self._cleanup_store_data()
         
         return results
     
@@ -504,17 +780,23 @@ class YouTubeSummarizerFlow(Flow):
         logger.info("Workflow state reset")
 
 
-def create_youtube_summarizer_flow(config: Optional[Dict[str, Any]] = None) -> YouTubeSummarizerFlow:
+def create_youtube_summarizer_flow(config: Optional[Union[Dict[str, Any], WorkflowConfig]] = None) -> YouTubeSummarizerFlow:
     """
     Factory function to create and configure a YouTube summarizer flow.
     
     Args:
-        config: Optional configuration dictionary
+        config: Optional configuration (dict for legacy support or WorkflowConfig)
         
     Returns:
         Configured YouTubeSummarizerFlow instance
     """
-    # Default configuration
+    if isinstance(config, WorkflowConfig):
+        # Use provided WorkflowConfig directly
+        flow = YouTubeSummarizerFlow(config=config)
+        logger.info(f"Created YouTube summarizer flow with WorkflowConfig: {config.execution_mode.value}")
+        return flow
+    
+    # Legacy dict-based configuration
     default_config = {
         'enable_monitoring': True,
         'enable_fallbacks': True,
@@ -526,11 +808,124 @@ def create_youtube_summarizer_flow(config: Optional[Dict[str, Any]] = None) -> Y
     if config:
         default_config.update(config)
     
-    # Create and return flow
+    # Create and return flow with legacy parameters
     flow = YouTubeSummarizerFlow(**default_config)
     
-    logger.info(f"Created YouTube summarizer flow with config: {default_config}")
+    logger.info(f"Created YouTube summarizer flow with legacy config: {default_config}")
     return flow
+
+
+def create_custom_workflow_config(
+    node_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+    data_flow_overrides: Optional[Dict[str, Any]] = None,
+    execution_mode: NodeExecutionMode = NodeExecutionMode.SEQUENTIAL,
+    **kwargs
+) -> WorkflowConfig:
+    """
+    Create a custom workflow configuration with specific node and data flow settings.
+    
+    Args:
+        node_configs: Dictionary of node configurations
+        data_flow_overrides: Data flow configuration overrides
+        execution_mode: Node execution mode
+        **kwargs: Additional workflow configuration parameters
+        
+    Returns:
+        Custom WorkflowConfig instance
+    """
+    # Start with default node configurations
+    default_node_configs = {
+        'YouTubeTranscriptNode': {
+            'enabled': True,
+            'required': True,
+            'max_retries': 3,
+            'retry_delay': 1.0,
+            'timeout_seconds': 60
+        },
+        'SummarizationNode': {
+            'enabled': True,
+            'required': True,
+            'max_retries': 3,
+            'retry_delay': 2.0,
+            'timeout_seconds': 120
+        },
+        'TimestampNode': {
+            'enabled': True,
+            'required': False,
+            'max_retries': 3,
+            'retry_delay': 2.0,
+            'timeout_seconds': 90
+        },
+        'KeywordExtractionNode': {
+            'enabled': True,
+            'required': False,
+            'max_retries': 3,
+            'retry_delay': 1.5,
+            'timeout_seconds': 60
+        }
+    }
+    
+    # Merge with provided node configs
+    if node_configs:
+        for node_name, node_config in node_configs.items():
+            if node_name in default_node_configs:
+                default_node_configs[node_name].update(node_config)
+    
+    # Convert to NodeConfig objects
+    node_config_objects = {}
+    for node_name, config_dict in default_node_configs.items():
+        node_config_objects[node_name] = NodeConfig(
+            name=node_name,
+            enabled=config_dict.get('enabled', True),
+            required=config_dict.get('required', True),
+            max_retries=config_dict.get('max_retries', 3),
+            retry_delay=config_dict.get('retry_delay', 1.0),
+            timeout_seconds=config_dict.get('timeout_seconds', 60),
+            dependencies=config_dict.get('dependencies', []),
+            output_keys=config_dict.get('output_keys', [])
+        )
+    
+    # Default data flow config
+    data_flow_config = DataFlowConfig(
+        input_mapping={'youtube_url': 'youtube_url'},
+        output_mapping={
+            'transcript_data': 'transcript_data',
+            'summary_data': 'summary_data',
+            'timestamp_data': 'timestamp_data',
+            'keyword_data': 'keyword_data'
+        },
+        data_validation={
+            'youtube_url': {'type': str, 'required': True},
+            'transcript_data': {'type': dict, 'required': True}
+        },
+        cleanup_keys=['_internal_processing_state', '_temp_data']
+    )
+    
+    # Apply data flow overrides
+    if data_flow_overrides:
+        if 'input_mapping' in data_flow_overrides:
+            data_flow_config.input_mapping.update(data_flow_overrides['input_mapping'])
+        if 'output_mapping' in data_flow_overrides:
+            data_flow_config.output_mapping.update(data_flow_overrides['output_mapping'])
+        if 'data_validation' in data_flow_overrides:
+            data_flow_config.data_validation.update(data_flow_overrides['data_validation'])
+        if 'cleanup_keys' in data_flow_overrides:
+            data_flow_config.cleanup_keys.extend(data_flow_overrides['cleanup_keys'])
+    
+    # Create workflow config
+    workflow_config = WorkflowConfig(
+        execution_mode=execution_mode,
+        node_configs=node_config_objects,
+        data_flow_config=data_flow_config,
+        enable_monitoring=kwargs.get('enable_monitoring', True),
+        enable_fallbacks=kwargs.get('enable_fallbacks', True),
+        max_retries=kwargs.get('max_retries', 2),
+        timeout_seconds=kwargs.get('timeout_seconds', 300),
+        store_cleanup=kwargs.get('store_cleanup', True)
+    )
+    
+    logger.info(f"Created custom workflow config with {len(node_config_objects)} nodes")
+    return workflow_config
 
 
 # Convenience function for direct usage
