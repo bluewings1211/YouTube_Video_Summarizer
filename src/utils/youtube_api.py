@@ -35,6 +35,7 @@ except ImportError:
     )
 
 from src.utils.validators import YouTubeURLValidator
+from src.utils.language_detector import YouTubeLanguageDetector, LanguageDetectionResult
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -537,6 +538,289 @@ class YouTubeVideoMetadataExtractor:
         return validation_result['is_valid_duration']
 
 
+class TranscriptTier:
+    """Enumeration of transcript quality tiers."""
+    MANUAL = "manual"           # Tier 1: Manually created transcripts (highest quality)
+    AUTO_GENERATED = "auto"     # Tier 2: Auto-generated transcripts (medium quality)  
+    TRANSLATED = "translated"   # Tier 3: Translated transcripts (lowest quality)
+
+
+class TranscriptInfo:
+    """Information about a transcript including its tier and metadata."""
+    
+    def __init__(self, language_code: str, is_generated: bool, is_translatable: bool, 
+                 video_id: str = "", original_transcript=None):
+        self.language_code = language_code
+        self.is_generated = is_generated
+        self.is_translatable = is_translatable
+        self.video_id = video_id
+        self.original_transcript = original_transcript
+        
+        # Determine transcript tier
+        if not is_generated:
+            self.tier = TranscriptTier.MANUAL
+        elif is_translatable:
+            self.tier = TranscriptTier.TRANSLATED
+        else:
+            self.tier = TranscriptTier.AUTO_GENERATED
+        
+        # Quality score (higher is better)
+        self.quality_score = self._calculate_quality_score()
+    
+    def _calculate_quality_score(self) -> int:
+        """Calculate quality score for transcript comparison."""
+        if self.tier == TranscriptTier.MANUAL:
+            return 100
+        elif self.tier == TranscriptTier.AUTO_GENERATED:
+            return 50
+        else:  # TRANSLATED
+            return 25
+    
+    def __repr__(self):
+        return f"TranscriptInfo(lang={self.language_code}, tier={self.tier}, score={self.quality_score})"
+
+
+class ThreeTierTranscriptStrategy:
+    """
+    Implements three-tier transcript acquisition strategy.
+    
+    Tier 1: Manual transcripts (highest quality, human-created)
+    Tier 2: Auto-generated transcripts (medium quality, AI-created)
+    Tier 3: Translated transcripts (lowest quality, translated from other languages)
+    """
+    
+    def __init__(self, language_detector: Optional[YouTubeLanguageDetector] = None):
+        self.language_detector = language_detector or YouTubeLanguageDetector()
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+    
+    def get_transcript_strategy(self, video_id: str, preferred_languages: Optional[List[str]] = None,
+                              video_metadata: Optional[Dict[str, Any]] = None) -> List[TranscriptInfo]:
+        """
+        Get ordered list of transcript acquisition attempts based on three-tier strategy.
+        
+        Args:
+            video_id: YouTube video ID
+            preferred_languages: List of preferred language codes
+            video_metadata: Optional video metadata for language detection
+            
+        Returns:
+            List of TranscriptInfo objects ordered by preference (highest quality first)
+            
+        Raises:
+            YouTubeTranscriptError: If unable to analyze transcript options
+        """
+        try:
+            self.logger.debug(f"Building three-tier strategy for video {video_id}")
+            
+            # Get available transcripts
+            available_transcripts = self._get_available_transcripts(video_id)
+            
+            if not available_transcripts:
+                raise NoTranscriptAvailableError(video_id, [])
+            
+            # Determine preferred languages from video metadata if not provided
+            if not preferred_languages and video_metadata:
+                try:
+                    detection_result = self.language_detector.detect_language_from_metadata(video_metadata)
+                    preferred_languages = self.language_detector.get_preferred_transcript_languages(detection_result)
+                    self.logger.debug(f"Detected preferred languages: {preferred_languages}")
+                except Exception as e:
+                    self.logger.warning(f"Language detection failed, using default languages: {str(e)}")
+                    preferred_languages = ['en', 'zh-CN', 'zh-TW', 'zh', 'ja', 'ko']
+            elif not preferred_languages:
+                preferred_languages = ['en', 'zh-CN', 'zh-TW', 'zh', 'ja', 'ko']
+            
+            # Create transcript info objects
+            transcript_infos = []
+            for transcript in available_transcripts:
+                try:
+                    info = TranscriptInfo(
+                        language_code=transcript.language_code,
+                        is_generated=transcript.is_generated,
+                        is_translatable=transcript.is_translatable,
+                        video_id=video_id,
+                        original_transcript=transcript
+                    )
+                    transcript_infos.append(info)
+                except Exception as e:
+                    self.logger.warning(f"Failed to create TranscriptInfo for {transcript.language_code}: {str(e)}")
+            
+            # Sort transcripts by three-tier strategy
+            strategy_order = self._sort_by_strategy(transcript_infos, preferred_languages)
+            
+            self.logger.info(f"Three-tier strategy for {video_id}: {len(strategy_order)} options available")
+            for i, info in enumerate(strategy_order[:5]):  # Log first 5
+                self.logger.debug(f"  {i+1}. {info.language_code} ({info.tier}, score: {info.quality_score})")
+            
+            return strategy_order
+            
+        except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
+            # Re-raise known transcript errors
+            raise NoTranscriptAvailableError(video_id, [])
+        except Exception as e:
+            self.logger.error(f"Failed to build transcript strategy for {video_id}: {str(e)}")
+            raise YouTubeTranscriptError(f"Failed to analyze transcript options: {str(e)}", video_id)
+    
+    def _get_available_transcripts(self, video_id: str):
+        """Get available transcripts from YouTube API."""
+        try:
+            return YouTubeTranscriptApi.list_transcripts(video_id)
+        except Exception as e:
+            self.logger.debug(f"Failed to list transcripts for {video_id}: {str(e)}")
+            raise
+    
+    def _sort_by_strategy(self, transcript_infos: List[TranscriptInfo], 
+                         preferred_languages: List[str]) -> List[TranscriptInfo]:
+        """
+        Sort transcripts by three-tier strategy preference.
+        
+        Priority order:
+        1. Manual transcripts in preferred languages (Tier 1)
+        2. Auto-generated transcripts in preferred languages (Tier 2)
+        3. Manual transcripts in other languages (Tier 1 fallback)
+        4. Auto-generated transcripts in other languages (Tier 2 fallback)
+        5. Translated transcripts in preferred languages (Tier 3)
+        6. Translated transcripts in other languages (Tier 3 fallback)
+        """
+        
+        def sort_key(transcript_info: TranscriptInfo):
+            # Language preference score (higher for preferred languages)
+            try:
+                lang_score = len(preferred_languages) - preferred_languages.index(transcript_info.language_code)
+            except ValueError:
+                # Check for partial matches (e.g., 'en' matches 'en-US')
+                lang_score = 0
+                for i, lang in enumerate(preferred_languages):
+                    if (transcript_info.language_code.startswith(lang) or 
+                        lang.startswith(transcript_info.language_code)):
+                        lang_score = len(preferred_languages) - i
+                        break
+            
+            # Tier priority score
+            if transcript_info.tier == TranscriptTier.MANUAL:
+                tier_score = 1000
+            elif transcript_info.tier == TranscriptTier.AUTO_GENERATED:
+                tier_score = 500  
+            else:  # TRANSLATED
+                tier_score = 100
+            
+            # Combined score (tier is most important, then language preference)
+            total_score = tier_score + lang_score
+            
+            # Log for debugging
+            self.logger.debug(f"Score for {transcript_info.language_code} ({transcript_info.tier}): {total_score}")
+            
+            return total_score
+        
+        # Sort by combined score (highest first)
+        sorted_transcripts = sorted(transcript_infos, key=sort_key, reverse=True)
+        
+        return sorted_transcripts
+    
+    def get_best_transcript_option(self, video_id: str, preferred_languages: Optional[List[str]] = None,
+                                  video_metadata: Optional[Dict[str, Any]] = None) -> Optional[TranscriptInfo]:
+        """
+        Get the single best transcript option based on three-tier strategy.
+        
+        Args:
+            video_id: YouTube video ID
+            preferred_languages: List of preferred language codes
+            video_metadata: Optional video metadata for language detection
+            
+        Returns:
+            Best TranscriptInfo option or None if no transcripts available
+        """
+        try:
+            strategy_order = self.get_transcript_strategy(video_id, preferred_languages, video_metadata)
+            return strategy_order[0] if strategy_order else None
+        except Exception:
+            return None
+    
+    def categorize_transcripts_by_tier(self, transcript_infos: List[TranscriptInfo]) -> Dict[str, List[TranscriptInfo]]:
+        """
+        Categorize transcripts by their tier.
+        
+        Args:
+            transcript_infos: List of transcript information objects
+            
+        Returns:
+            Dictionary with tiers as keys and lists of transcripts as values
+        """
+        categorized = {
+            TranscriptTier.MANUAL: [],
+            TranscriptTier.AUTO_GENERATED: [],
+            TranscriptTier.TRANSLATED: []
+        }
+        
+        for info in transcript_infos:
+            categorized[info.tier].append(info)
+        
+        return categorized
+    
+    def get_transcript_tier_summary(self, video_id: str, preferred_languages: Optional[List[str]] = None,
+                                   video_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Get summary of available transcripts organized by tier.
+        
+        Args:
+            video_id: YouTube video ID
+            preferred_languages: List of preferred language codes
+            video_metadata: Optional video metadata for language detection
+            
+        Returns:
+            Dictionary containing transcript tier summary
+        """
+        try:
+            strategy_order = self.get_transcript_strategy(video_id, preferred_languages, video_metadata)
+            categorized = self.categorize_transcripts_by_tier(strategy_order)
+            
+            summary = {
+                'video_id': video_id,
+                'total_transcripts': len(strategy_order),
+                'tiers': {
+                    'manual': {
+                        'count': len(categorized[TranscriptTier.MANUAL]),
+                        'languages': [t.language_code for t in categorized[TranscriptTier.MANUAL]]
+                    },
+                    'auto_generated': {
+                        'count': len(categorized[TranscriptTier.AUTO_GENERATED]),
+                        'languages': [t.language_code for t in categorized[TranscriptTier.AUTO_GENERATED]]
+                    },
+                    'translated': {
+                        'count': len(categorized[TranscriptTier.TRANSLATED]),
+                        'languages': [t.language_code for t in categorized[TranscriptTier.TRANSLATED]]
+                    }
+                },
+                'best_option': {
+                    'language': strategy_order[0].language_code if strategy_order else None,
+                    'tier': strategy_order[0].tier if strategy_order else None,
+                    'quality_score': strategy_order[0].quality_score if strategy_order else None
+                },
+                'preferred_languages': preferred_languages,
+                'strategy_order': [
+                    {
+                        'language': t.language_code,
+                        'tier': t.tier,
+                        'quality_score': t.quality_score
+                    } for t in strategy_order
+                ]
+            }
+            
+            return summary
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate transcript tier summary for {video_id}: {str(e)}")
+            return {
+                'video_id': video_id,
+                'error': str(e),
+                'total_transcripts': 0,
+                'tiers': {'manual': {'count': 0, 'languages': []}, 
+                         'auto_generated': {'count': 0, 'languages': []},
+                         'translated': {'count': 0, 'languages': []}},
+                'best_option': {'language': None, 'tier': None, 'quality_score': None}
+            }
+
+
 class YouTubeTranscriptFetcher:
     """Handles YouTube transcript fetching and processing."""
     
@@ -544,6 +828,7 @@ class YouTubeTranscriptFetcher:
         self.formatter = TextFormatter()
         self.api = YouTubeTranscriptApi
         self.metadata_extractor = YouTubeVideoMetadataExtractor()
+        self.three_tier_strategy = ThreeTierTranscriptStrategy()
     
     def fetch_transcript(
         self, 
@@ -993,6 +1278,200 @@ class YouTubeTranscriptFetcher:
             return 'en'
         
         return 'unknown'
+    
+    def fetch_transcript_with_three_tier_strategy(
+        self, 
+        video_id: str, 
+        preferred_languages: Optional[List[str]] = None,
+        include_metadata: bool = True,
+        check_unsupported: bool = True,
+        max_duration_seconds: int = 1800,
+        max_tier_attempts: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Fetch transcript using three-tier strategy (manual > auto-generated > translated).
+        
+        This method implements the enhanced transcript acquisition strategy that tries
+        transcripts in order of quality preference, falling back to lower tiers if needed.
+        
+        Args:
+            video_id: YouTube video ID
+            preferred_languages: List of preferred language codes (auto-detected if None)
+            include_metadata: Whether to include video metadata
+            check_unsupported: Whether to check for unsupported video types
+            max_duration_seconds: Maximum allowed duration in seconds
+            max_tier_attempts: Maximum number of transcript options to try per tier
+            
+        Returns:
+            Dictionary containing transcript data and three-tier metadata
+            
+        Raises:
+            YouTubeTranscriptError: If transcript cannot be fetched
+            UnsupportedVideoTypeError: If video type is not supported
+            VideoTooLongError: If video exceeds duration limit
+        """
+        if not video_id:
+            raise YouTubeTranscriptError("Video ID is required")
+            
+        if not YouTubeURLValidator._is_valid_video_id(video_id):
+            raise YouTubeTranscriptError(f"Invalid video ID format: {video_id}")
+        
+        self.logger.debug(f"Starting three-tier transcript acquisition for video {video_id}")
+        
+        # Check for unsupported video types first
+        if check_unsupported:
+            try:
+                support_status = self.metadata_extractor.detect_unsupported_video_type(
+                    video_id, max_duration_seconds
+                )
+                
+                if not support_status['is_supported']:
+                    for issue in support_status['issues']:
+                        if issue['type'] == 'private':
+                            raise PrivateVideoError(video_id)
+                        elif issue['type'] == 'live':
+                            raise LiveVideoError(video_id)
+                        elif issue['type'] == 'too_long':
+                            raise VideoTooLongError(video_id)
+                        
+            except (PrivateVideoError, LiveVideoError, VideoTooLongError):
+                raise  # Re-raise these specific errors
+            except Exception as e:
+                self.logger.warning(f"Could not check video support status for {video_id}: {str(e)}")
+                # Continue with transcript fetch attempt
+        
+        # Get video metadata for language detection
+        video_metadata = None
+        if include_metadata:
+            try:
+                video_metadata = self.metadata_extractor.extract_video_metadata(video_id)
+            except Exception as e:
+                self.logger.warning(f"Failed to extract video metadata for {video_id}: {str(e)}")
+        
+        # Build three-tier strategy
+        try:
+            strategy_order = self.three_tier_strategy.get_transcript_strategy(
+                video_id, preferred_languages, video_metadata
+            )
+            
+            if not strategy_order:
+                raise NoTranscriptAvailableError(video_id, [])
+            
+            self.logger.info(f"Three-tier strategy built: {len(strategy_order)} transcript options available")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to build three-tier strategy for {video_id}: {str(e)}")
+            raise YouTubeTranscriptError(f"Failed to analyze transcript options: {str(e)}", video_id)
+        
+        # Try transcripts in three-tier order
+        last_error = None
+        attempts_made = []
+        
+        for attempt_num, transcript_info in enumerate(strategy_order[:max_tier_attempts * 3]):
+            try:
+                self.logger.debug(f"Attempt {attempt_num + 1}: Trying {transcript_info.language_code} ({transcript_info.tier})")
+                
+                # Fetch the transcript using the original transcript object
+                if transcript_info.original_transcript:
+                    transcript_data = transcript_info.original_transcript.fetch()
+                else:
+                    # Fallback to API call
+                    transcript_data = self.api.get_transcript(video_id, [transcript_info.language_code])
+                
+                # Format transcript
+                formatted_transcript = self.formatter.format_transcript(transcript_data)
+                
+                # Extract additional metadata from transcript
+                duration = self._calculate_duration(transcript_data)
+                word_count = len(formatted_transcript.split())
+                
+                # Success - build result
+                result = {
+                    'video_id': video_id,
+                    'transcript': formatted_transcript,
+                    'raw_transcript': transcript_data,
+                    'language': transcript_info.language_code,
+                    'duration_seconds': duration,
+                    'word_count': word_count,
+                    'fetch_timestamp': datetime.utcnow().isoformat(),
+                    'success': True,
+                    'three_tier_metadata': {
+                        'selected_tier': transcript_info.tier,
+                        'selected_language': transcript_info.language_code,
+                        'quality_score': transcript_info.quality_score,
+                        'attempt_number': attempt_num + 1,
+                        'total_attempts': len(attempts_made) + 1,
+                        'strategy_options': len(strategy_order),
+                        'tier_summary': self.three_tier_strategy.get_transcript_tier_summary(
+                            video_id, preferred_languages, video_metadata
+                        ),
+                        'attempts_made': attempts_made + [{
+                            'language': transcript_info.language_code,
+                            'tier': transcript_info.tier,
+                            'quality_score': transcript_info.quality_score,
+                            'success': True
+                        }]
+                    }
+                }
+                
+                # Include video metadata if available
+                if video_metadata:
+                    result['video_metadata'] = video_metadata
+                    
+                    # Update duration if available from metadata (more accurate)
+                    if video_metadata.get('duration_seconds'):
+                        result['duration_seconds'] = video_metadata['duration_seconds']
+                
+                self.logger.info(f"Three-tier transcript acquisition successful for {video_id}: "
+                               f"{transcript_info.language_code} ({transcript_info.tier})")
+                
+                return result
+                
+            except Exception as e:
+                # Record this attempt
+                attempt_record = {
+                    'language': transcript_info.language_code,
+                    'tier': transcript_info.tier,
+                    'quality_score': transcript_info.quality_score,
+                    'success': False,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                }
+                attempts_made.append(attempt_record)
+                
+                last_error = e
+                self.logger.warning(f"Attempt {attempt_num + 1} failed for {transcript_info.language_code} "
+                                  f"({transcript_info.tier}): {str(e)}")
+                
+                # Continue to next transcript option
+                continue
+        
+        # All attempts failed
+        available_languages = [info.language_code for info in strategy_order]
+        
+        self.logger.error(f"All three-tier transcript attempts failed for video {video_id}")
+        
+        # Provide detailed error information
+        error_summary = {
+            'total_attempts': len(attempts_made),
+            'available_languages': available_languages,
+            'attempts_made': attempts_made,
+            'tier_summary': self.three_tier_strategy.get_transcript_tier_summary(
+                video_id, preferred_languages, video_metadata
+            ) if video_metadata else None
+        }
+        
+        if isinstance(last_error, (TranscriptsDisabled, NoTranscriptFound)):
+            raise NoTranscriptAvailableError(video_id, available_languages)
+        elif isinstance(last_error, VideoUnavailable):
+            raise YouTubeTranscriptError(f"Video unavailable: {str(last_error)}", video_id)
+        elif isinstance(last_error, TooManyRequests):
+            raise YouTubeTranscriptError(f"Rate limit exceeded: {str(last_error)}", video_id)
+        else:
+            raise YouTubeTranscriptError(
+                f"Failed to fetch transcript after {len(attempts_made)} attempts: {str(last_error)}", 
+                video_id
+            )
 
 
 # Convenience functions
@@ -1212,3 +1691,52 @@ def check_youtube_duration_limit_from_url(
     """
     fetcher = YouTubeTranscriptFetcher()
     return fetcher.check_duration_limit_from_url(url, max_duration_seconds, raise_on_exceeded)
+
+
+def fetch_youtube_transcript_with_three_tier_strategy(
+    video_id: str, 
+    preferred_languages: Optional[List[str]] = None,
+    include_metadata: bool = True,
+    check_unsupported: bool = True,
+    max_duration_seconds: int = 1800,
+    max_tier_attempts: int = 3
+) -> Dict[str, Any]:
+    """
+    Convenience function to fetch YouTube transcript using three-tier strategy.
+    
+    Args:
+        video_id: YouTube video ID
+        preferred_languages: List of preferred language codes (auto-detected if None)
+        include_metadata: Whether to include video metadata
+        check_unsupported: Whether to check for unsupported video types
+        max_duration_seconds: Maximum allowed duration in seconds
+        max_tier_attempts: Maximum number of transcript options to try per tier
+        
+    Returns:
+        Dictionary containing transcript data and three-tier metadata
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.fetch_transcript_with_three_tier_strategy(
+        video_id, preferred_languages, include_metadata, check_unsupported, 
+        max_duration_seconds, max_tier_attempts
+    )
+
+
+def get_youtube_transcript_tier_summary(
+    video_id: str, 
+    preferred_languages: Optional[List[str]] = None,
+    video_metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Convenience function to get YouTube transcript tier summary.
+    
+    Args:
+        video_id: YouTube video ID
+        preferred_languages: List of preferred language codes
+        video_metadata: Optional video metadata for language detection
+        
+    Returns:
+        Dictionary containing transcript tier summary
+    """
+    strategy = ThreeTierTranscriptStrategy()
+    return strategy.get_transcript_tier_summary(video_id, preferred_languages, video_metadata)
