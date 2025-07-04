@@ -36,7 +36,7 @@
 
 - [ ] 2.0 YouTube Transcript Extraction System
   - [x] 2.1 Implement YouTube URL validation and video ID extraction in utils/validators.py
-  - [ ] 2.2 Create YouTube transcript fetching functionality in utils/youtube_api.py
+  - [x] 2.2 Create YouTube transcript fetching functionality in utils/youtube_api.py
   - [ ] 2.3 Add video metadata extraction (title, duration, language detection)
   - [ ] 2.4 Implement error detection for unsupported video types (private, live, no transcripts)
   - [ ] 2.5 Add video duration validation (30-minute limit)
