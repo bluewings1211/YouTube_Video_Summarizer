@@ -337,8 +337,8 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                     video_id=video_id,
                     languages=['en'],
                     include_metadata=True,
-                    check_unsupported=False,  # Already checked in prep
-                    max_duration_seconds=1800  # 30 minutes
+                    check_unsupported=False,
+                    max_duration_seconds=1800
                 )
                 
                 exec_result = {

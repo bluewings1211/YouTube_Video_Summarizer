@@ -578,7 +578,7 @@ class YouTubeTranscriptFetcher:
             raise YouTubeTranscriptError(f"Invalid video ID format: {video_id}")
             
         if languages is None:
-            languages = ['en']
+            languages = ['en', 'zh-TW', 'zh-CN', 'zh', 'ja', 'ko', 'fr', 'de', 'es', 'it', 'pt', 'ru']
         
         # Check for unsupported video types first
         if check_unsupported:
