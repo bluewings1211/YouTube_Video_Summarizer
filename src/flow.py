@@ -76,6 +76,8 @@ class WorkflowConfig:
     execution_mode: NodeExecutionMode = NodeExecutionMode.SEQUENTIAL
     node_configs: Dict[str, NodeConfig] = field(default_factory=dict)
     data_flow_config: DataFlowConfig = field(default_factory=DataFlowConfig)
+    fallback_strategy: FallbackStrategy = field(default_factory=FallbackStrategy)
+    circuit_breaker_config: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
     enable_monitoring: bool = True
     enable_fallbacks: bool = True
     max_retries: int = 2
@@ -104,6 +106,98 @@ class WorkflowError:
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     is_recoverable: bool = True
     context: Dict[str, Any] = field(default_factory=dict)
+    retry_count: int = 0
+    node_phase: Optional[str] = None  # prep, exec, post
+    recovery_action: Optional[str] = None
+    
+    
+@dataclass
+class FallbackStrategy:
+    """Configuration for fallback strategies."""
+    enable_transcript_only: bool = True      # Fallback to transcript only
+    enable_summary_fallback: bool = True     # Use simpler summary if AI fails
+    enable_partial_results: bool = True      # Return partial results on failure
+    enable_retry_with_degraded: bool = True  # Retry with reduced functionality
+    max_fallback_attempts: int = 2           # Maximum fallback attempts
+    fallback_timeout_factor: float = 0.5     # Reduce timeout for fallbacks
+    
+    
+@dataclass 
+class CircuitBreakerConfig:
+    """Configuration for circuit breaker pattern."""
+    failure_threshold: int = 3               # Failures before opening circuit
+    recovery_timeout: int = 60               # Seconds before attempting recovery
+    success_threshold: int = 2               # Successes needed to close circuit
+    enabled: bool = True                     # Enable circuit breaker
+    
+    
+class CircuitBreakerState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Circuit open, blocking requests
+    HALF_OPEN = "half_open"  # Testing if service recovered
+    
+    
+@dataclass
+class CircuitBreaker:
+    """Circuit breaker implementation for node failures."""
+    node_name: str
+    config: CircuitBreakerConfig
+    state: CircuitBreakerState = CircuitBreakerState.CLOSED
+    failure_count: int = 0
+    success_count: int = 0
+    last_failure_time: Optional[float] = None
+    consecutive_failures: int = 0
+    
+    def can_execute(self) -> bool:
+        """Check if node can execute based on circuit breaker state."""
+        if not self.config.enabled:
+            return True
+            
+        current_time = time.time()
+        
+        if self.state == CircuitBreakerState.CLOSED:
+            return True
+        elif self.state == CircuitBreakerState.OPEN:
+            if (self.last_failure_time and 
+                current_time - self.last_failure_time > self.config.recovery_timeout):
+                self.state = CircuitBreakerState.HALF_OPEN
+                return True
+            return False
+        elif self.state == CircuitBreakerState.HALF_OPEN:
+            return True
+        
+        return False
+    
+    def record_success(self) -> None:
+        """Record successful execution."""
+        self.success_count += 1
+        self.consecutive_failures = 0
+        
+        if self.state == CircuitBreakerState.HALF_OPEN:
+            if self.success_count >= self.config.success_threshold:
+                self.state = CircuitBreakerState.CLOSED
+                self.failure_count = 0
+    
+    def record_failure(self) -> None:
+        """Record failed execution."""
+        self.failure_count += 1
+        self.consecutive_failures += 1
+        self.last_failure_time = time.time()
+        
+        if (self.state == CircuitBreakerState.CLOSED and 
+            self.consecutive_failures >= self.config.failure_threshold):
+            self.state = CircuitBreakerState.OPEN
+        elif self.state == CircuitBreakerState.HALF_OPEN:
+            self.state = CircuitBreakerState.OPEN
+            
+            
+class ErrorSeverity(Enum):
+    """Error severity levels."""
+    LOW = "low"           # Minor issues, continue processing
+    MEDIUM = "medium"     # Significant issues, try fallback
+    HIGH = "high"         # Major issues, stop processing
+    CRITICAL = "critical" # System-level issues, immediate failure
 
 
 @dataclass
@@ -163,9 +257,14 @@ class YouTubeSummarizerFlow(Flow):
         self.metrics = None
         self.workflow_errors: List[WorkflowError] = []
         self.node_instances: Dict[str, Node] = {}
+        self.circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self.fallback_attempts: Dict[str, int] = {}
         
         # Initialize nodes with configuration
         self._initialize_configured_nodes()
+        
+        # Initialize circuit breakers
+        self._initialize_circuit_breakers()
         
         # Setup monitoring
         if self.enable_monitoring:
@@ -251,6 +350,8 @@ class YouTubeSummarizerFlow(Flow):
             execution_mode=NodeExecutionMode.SEQUENTIAL,
             node_configs=node_configs,
             data_flow_config=data_flow_config,
+            fallback_strategy=FallbackStrategy(),
+            circuit_breaker_config=CircuitBreakerConfig(),
             enable_monitoring=enable_monitoring,
             enable_fallbacks=enable_fallbacks,
             max_retries=max_retries,
@@ -335,6 +436,89 @@ class YouTubeSummarizerFlow(Flow):
                 sorted_nodes.append(node_map[node_name])
         
         return sorted_nodes
+    
+    def _initialize_circuit_breakers(self) -> None:
+        """Initialize circuit breakers for all enabled nodes."""
+        if not self.config.circuit_breaker_config.enabled:
+            logger.info("Circuit breakers disabled in configuration")
+            return
+        
+        for node_name in self.config.node_configs.keys():
+            if self.config.node_configs[node_name].enabled:
+                self.circuit_breakers[node_name] = CircuitBreaker(
+                    node_name=node_name,
+                    config=self.config.circuit_breaker_config
+                )
+                logger.debug(f"Initialized circuit breaker for {node_name}")
+        
+        logger.info(f"Initialized {len(self.circuit_breakers)} circuit breakers")
+    
+    def _classify_error_severity(self, error: Exception, node_name: str) -> ErrorSeverity:
+        """Classify error severity for appropriate handling."""
+        error_type = type(error).__name__
+        error_message = str(error).lower()
+        
+        # Critical system-level errors
+        if isinstance(error, (MemoryError, SystemError)):
+            return ErrorSeverity.CRITICAL
+        
+        # High severity - likely requires stopping
+        if isinstance(error, (ConnectionError, TimeoutError)):
+            return ErrorSeverity.HIGH
+        
+        # Node-specific error classification
+        if node_name == "YouTubeTranscriptNode":
+            # Transcript errors are usually high severity since other nodes depend on it
+            if "invalid" in error_message or "not found" in error_message:
+                return ErrorSeverity.HIGH
+            return ErrorSeverity.MEDIUM
+        
+        elif node_name in ["TimestampNode", "KeywordExtractionNode"]:
+            # These are optional nodes, so failures are medium severity
+            return ErrorSeverity.MEDIUM
+        
+        elif node_name == "SummarizationNode":
+            # Summary failures are significant but recoverable
+            if "api" in error_message or "rate limit" in error_message:
+                return ErrorSeverity.HIGH
+            return ErrorSeverity.MEDIUM
+        
+        # Default to medium severity
+        return ErrorSeverity.MEDIUM
+    
+    def _should_attempt_fallback(self, error: WorkflowError, node_name: str) -> bool:
+        """Determine if fallback should be attempted for an error."""
+        if not self.enable_fallbacks:
+            return False
+        
+        # Check fallback attempt limits
+        attempts = self.fallback_attempts.get(node_name, 0)
+        if attempts >= self.config.fallback_strategy.max_fallback_attempts:
+            logger.warning(f"Max fallback attempts reached for {node_name}")
+            return False
+        
+        # Check error severity
+        severity = self._classify_error_severity(Exception(error.message), node_name)
+        if severity == ErrorSeverity.CRITICAL:
+            return False
+        
+        # Check circuit breaker state
+        if node_name in self.circuit_breakers:
+            if not self.circuit_breakers[node_name].can_execute():
+                logger.info(f"Circuit breaker open for {node_name}, skipping fallback")
+                return False
+        
+        # Check specific fallback strategy settings
+        strategy = self.config.fallback_strategy
+        
+        if node_name == "YouTubeTranscriptNode" and strategy.enable_transcript_only:
+            return True
+        elif node_name == "SummarizationNode" and strategy.enable_summary_fallback:
+            return True
+        elif node_name in ["TimestampNode", "KeywordExtractionNode"] and strategy.enable_partial_results:
+            return True
+        
+        return strategy.enable_retry_with_degraded
     
     def _validate_data_flow(self, current_node_name: str) -> None:
         """Validate data flow requirements before node execution."""
@@ -514,7 +698,7 @@ class YouTubeSummarizerFlow(Flow):
         raise RuntimeError("Workflow failed after all retries")
     
     def _execute_nodes_sequence(self) -> Dict[str, Any]:
-        """Execute all nodes in the configured sequence with data flow validation."""
+        """Execute all nodes in the configured sequence with enhanced error handling."""
         results = {}
         
         for node in self.nodes:
@@ -524,62 +708,78 @@ class YouTubeSummarizerFlow(Flow):
             try:
                 logger.info(f"Executing node: {node.name}")
                 
+                # Check circuit breaker before execution
+                if node.name in self.circuit_breakers:
+                    if not self.circuit_breakers[node.name].can_execute():
+                        logger.warning(f"Circuit breaker open for {node.name}, skipping execution")
+                        results[node.name] = {
+                            'status': 'skipped_circuit_breaker',
+                            'timestamp': datetime.utcnow().isoformat(),
+                            'circuit_breaker_state': self.circuit_breakers[node.name].state.value
+                        }
+                        
+                        # Skip optional nodes, fail required nodes
+                        if node_config and node_config.required:
+                            raise RuntimeError(f"Required node {node.name} skipped due to circuit breaker")
+                        continue
+                
                 # Validate data flow requirements before execution
                 self._validate_data_flow(node.name)
                 
-                # Execute node phases
-                prep_result = node.prep(self.store)
-                exec_result = node.exec(self.store, prep_result)
-                post_result = node.post(self.store, prep_result, exec_result)
+                # Execute node with enhanced error handling
+                node_result = self._execute_single_node_with_fallback(node, node_config)
+                results[node.name] = node_result
                 
-                # Store node results
-                results[node.name] = {
-                    'prep': prep_result,
-                    'exec': exec_result,
-                    'post': post_result
-                }
+                # Record success in circuit breaker
+                if node.name in self.circuit_breakers and node_result.get('status') == 'success':
+                    self.circuit_breakers[node.name].record_success()
                 
                 # Handle node failure based on configuration
-                if post_result.get('post_status') != 'success':
-                    error_msg = post_result.get('error', 'Unknown node error')
+                if node_result.get('status') not in ['success', 'partial_success']:
+                    # Record failure in circuit breaker
+                    if node.name in self.circuit_breakers:
+                        self.circuit_breakers[node.name].record_failure()
                     
                     # Check if this is a required node
                     if node_config and node_config.required:
+                        error_msg = node_result.get('error', 'Unknown node error')
                         raise RuntimeError(f"Required node {node.name} failed: {error_msg}")
                     else:
                         # Optional node failure - log warning and continue
-                        logger.warning(f"Optional node {node.name} failed: {error_msg}")
-                        results[node.name]['status'] = 'failed_optional'
-                        
-                        # Track metrics even for failed optional nodes
-                        if self.enable_monitoring:
-                            node_duration = time.time() - node_start_time
-                            self.metrics.node_durations[node.name] = node_duration
-                            self.metrics.node_retry_counts[node.name] = exec_result.get('retry_count', 0)
-                        
+                        logger.warning(f"Optional node {node.name} failed, continuing")
                         continue
                 
                 # Map output data based on configuration
-                self._map_output_data(node.name, post_result)
+                if node_result.get('post', {}).get('post_status') == 'success':
+                    self._map_output_data(node.name, node_result['post'])
                 
-                # Track metrics for successful execution
+                # Track metrics for execution
                 if self.enable_monitoring:
                     node_duration = time.time() - node_start_time
                     self.metrics.node_durations[node.name] = node_duration
                     
-                    # Track retry count
+                    # Track retry count from exec result
+                    exec_result = node_result.get('exec', {})
                     retry_count = exec_result.get('retry_count', 0)
                     self.metrics.node_retry_counts[node.name] = retry_count
                 
-                logger.info(f"Node {node.name} completed successfully")
+                logger.info(f"Node {node.name} completed with status: {node_result.get('status')}")
                 
             except Exception as e:
                 error_msg = f"Node {node.name} execution failed: {str(e)}"
                 logger.error(error_msg)
                 
+                # Record failure in circuit breaker
+                if node.name in self.circuit_breakers:
+                    self.circuit_breakers[node.name].record_failure()
+                
+                # Create structured error
+                error_info = self._create_enhanced_workflow_error(e, node.name, "execution")
+                self.workflow_errors.append(error_info)
+                
                 # Store partial results
                 results[node.name] = {
-                    'error': str(e),
+                    'error': error_info.__dict__,
                     'status': 'failed',
                     'timestamp': datetime.utcnow().isoformat()
                 }
@@ -596,6 +796,180 @@ class YouTubeSummarizerFlow(Flow):
         self._cleanup_store_data()
         
         return results
+    
+    def _execute_single_node_with_fallback(self, node: Node, node_config: Optional[NodeConfig]) -> Dict[str, Any]:
+        """Execute a single node with fallback mechanisms."""
+        primary_attempt = True
+        fallback_attempt = 0
+        
+        while True:
+            try:
+                # Adjust timeout for fallback attempts
+                timeout_factor = 1.0
+                if not primary_attempt:
+                    timeout_factor = self.config.fallback_strategy.fallback_timeout_factor
+                
+                # Execute node phases
+                prep_result = node.prep(self.store)
+                exec_result = node.exec(self.store, prep_result)
+                post_result = node.post(self.store, prep_result, exec_result)
+                
+                # Check for success
+                if post_result.get('post_status') == 'success':
+                    return {
+                        'status': 'success',
+                        'prep': prep_result,
+                        'exec': exec_result,
+                        'post': post_result,
+                        'primary_attempt': primary_attempt,
+                        'fallback_attempts': fallback_attempt
+                    }
+                else:
+                    # Node phases completed but post failed
+                    error_msg = post_result.get('error', 'Post-processing failed')
+                    raise RuntimeError(error_msg)
+                    
+            except Exception as e:
+                # Create error info for decision making
+                error_info = self._create_enhanced_workflow_error(e, node.name, "execution")
+                
+                # Check if we should attempt fallback
+                if primary_attempt and self._should_attempt_fallback(error_info, node.name):
+                    logger.info(f"Attempting fallback for {node.name}")
+                    primary_attempt = False
+                    fallback_attempt += 1
+                    
+                    # Track fallback attempt
+                    self.fallback_attempts[node.name] = fallback_attempt
+                    
+                    # Try fallback execution
+                    try:
+                        fallback_result = self._execute_node_fallback(node, error_info)
+                        if fallback_result:
+                            fallback_result['status'] = 'partial_success'
+                            fallback_result['fallback_used'] = True
+                            fallback_result['original_error'] = error_info.__dict__
+                            return fallback_result
+                    except Exception as fallback_error:
+                        logger.warning(f"Fallback also failed for {node.name}: {str(fallback_error)}")
+                
+                # No fallback or fallback failed
+                return {
+                    'status': 'failed',
+                    'error': error_info.__dict__,
+                    'primary_attempt': primary_attempt,
+                    'fallback_attempts': fallback_attempt,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+    
+    def _execute_node_fallback(self, node: Node, original_error: WorkflowError) -> Optional[Dict[str, Any]]:
+        """Execute fallback strategy for a failed node."""
+        strategy = self.config.fallback_strategy
+        
+        # Node-specific fallback strategies
+        if node.name == "YouTubeTranscriptNode" and strategy.enable_transcript_only:
+            return self._fallback_transcript_basic(node)
+        elif node.name == "SummarizationNode" and strategy.enable_summary_fallback:
+            return self._fallback_summary_simple(node)
+        elif node.name in ["TimestampNode", "KeywordExtractionNode"] and strategy.enable_partial_results:
+            return self._fallback_optional_node(node)
+        
+        return None
+    
+    def _fallback_transcript_basic(self, node: Node) -> Optional[Dict[str, Any]]:
+        """Basic fallback for transcript node with minimal processing."""
+        try:
+            # Try with simpler parameters
+            logger.info("Attempting basic transcript fallback")
+            
+            # Simple prep with reduced validation
+            prep_result = {'fallback_mode': True, 'prep_status': 'success'}
+            
+            # Execute with fallback parameters (would need to be implemented in the node)
+            # For now, return None to indicate fallback not available
+            return None
+            
+        except Exception as e:
+            logger.error(f"Transcript fallback failed: {str(e)}")
+            return None
+    
+    def _fallback_summary_simple(self, node: Node) -> Optional[Dict[str, Any]]:
+        """Simple fallback for summary node using basic text processing."""
+        try:
+            logger.info("Attempting simple summary fallback")
+            
+            # Get transcript data
+            transcript_data = self.store.get('transcript_data', {})
+            transcript_text = transcript_data.get('transcript_text', '')
+            
+            if not transcript_text:
+                return None
+            
+            # Create simple summary (first 500 words + last 100 words)
+            words = transcript_text.split()
+            if len(words) > 600:
+                simple_summary = ' '.join(words[:500]) + " ... " + ' '.join(words[-100:])
+            else:
+                simple_summary = transcript_text
+            
+            # Create fallback result
+            return {
+                'prep': {'prep_status': 'success', 'fallback_mode': True},
+                'exec': {'exec_status': 'success', 'summary_text': simple_summary, 'fallback_used': True},
+                'post': {'post_status': 'success'}
+            }
+            
+        except Exception as e:
+            logger.error(f"Summary fallback failed: {str(e)}")
+            return None
+    
+    def _fallback_optional_node(self, node: Node) -> Optional[Dict[str, Any]]:
+        """Fallback for optional nodes - return empty but successful result."""
+        try:
+            logger.info(f"Using empty fallback for optional node {node.name}")
+            
+            return {
+                'prep': {'prep_status': 'success', 'fallback_mode': True},
+                'exec': {'exec_status': 'success', 'fallback_used': True, 'empty_result': True},
+                'post': {'post_status': 'success'}
+            }
+            
+        except Exception as e:
+            logger.error(f"Optional node fallback failed: {str(e)}")
+            return None
+    
+    def _create_enhanced_workflow_error(self, error: Exception, node_name: str, phase: str) -> WorkflowError:
+        """Create enhanced workflow error with additional context."""
+        severity = self._classify_error_severity(error, node_name)
+        
+        # Determine recovery action
+        recovery_action = None
+        if severity in [ErrorSeverity.LOW, ErrorSeverity.MEDIUM]:
+            if self._should_attempt_fallback(WorkflowError(
+                flow_name=self.name,
+                error_type=type(error).__name__,
+                message=str(error)
+            ), node_name):
+                recovery_action = "fallback_available"
+            else:
+                recovery_action = "continue_processing"
+        else:
+            recovery_action = "stop_processing"
+        
+        return WorkflowError(
+            flow_name=self.name,
+            error_type=type(error).__name__,
+            message=str(error),
+            failed_node=node_name,
+            is_recoverable=severity in [ErrorSeverity.LOW, ErrorSeverity.MEDIUM],
+            node_phase=phase,
+            recovery_action=recovery_action,
+            context={
+                'severity': severity.value,
+                'circuit_breaker_state': self.circuit_breakers.get(node_name, {}).state.value if node_name in self.circuit_breakers else 'none',
+                'fallback_attempts': self.fallback_attempts.get(node_name, 0)
+            }
+        )
     
     def _handle_workflow_error(self, error: Exception, context: str) -> WorkflowError:
         """Handle and log workflow errors."""
@@ -912,11 +1286,31 @@ def create_custom_workflow_config(
         if 'cleanup_keys' in data_flow_overrides:
             data_flow_config.cleanup_keys.extend(data_flow_overrides['cleanup_keys'])
     
+    # Create fallback strategy
+    fallback_strategy = FallbackStrategy(
+        enable_transcript_only=kwargs.get('enable_transcript_only', True),
+        enable_summary_fallback=kwargs.get('enable_summary_fallback', True),
+        enable_partial_results=kwargs.get('enable_partial_results', True),
+        enable_retry_with_degraded=kwargs.get('enable_retry_with_degraded', True),
+        max_fallback_attempts=kwargs.get('max_fallback_attempts', 2),
+        fallback_timeout_factor=kwargs.get('fallback_timeout_factor', 0.5)
+    )
+    
+    # Create circuit breaker config
+    circuit_breaker_config = CircuitBreakerConfig(
+        failure_threshold=kwargs.get('failure_threshold', 3),
+        recovery_timeout=kwargs.get('recovery_timeout', 60),
+        success_threshold=kwargs.get('success_threshold', 2),
+        enabled=kwargs.get('enable_circuit_breaker', True)
+    )
+    
     # Create workflow config
     workflow_config = WorkflowConfig(
         execution_mode=execution_mode,
         node_configs=node_config_objects,
         data_flow_config=data_flow_config,
+        fallback_strategy=fallback_strategy,
+        circuit_breaker_config=circuit_breaker_config,
         enable_monitoring=kwargs.get('enable_monitoring', True),
         enable_fallbacks=kwargs.get('enable_fallbacks', True),
         max_retries=kwargs.get('max_retries', 2),
