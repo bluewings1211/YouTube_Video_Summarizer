@@ -32,5 +32,8 @@ mypy>=1.7.0
 # Development
 python-decouple>=3.8
 
+# Logging
+python-json-logger>=2.0.7
+
 # Container Health Checks
 psutil>=5.9.0
