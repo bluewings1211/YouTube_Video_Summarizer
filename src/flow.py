@@ -201,15 +201,64 @@ class ErrorSeverity(Enum):
 
 
 @dataclass
+class NodeMetrics:
+    """Detailed metrics for individual node execution."""
+    node_name: str
+    start_time: float
+    end_time: Optional[float] = None
+    duration: float = 0.0
+    retry_count: int = 0
+    status: str = "pending"  # pending, running, success, failed, skipped
+    memory_before: Optional[int] = None
+    memory_after: Optional[int] = None
+    memory_peak: Optional[int] = None
+    error_count: int = 0
+    fallback_used: bool = False
+    circuit_breaker_state: str = "closed"
+    phase_durations: Dict[str, float] = field(default_factory=dict)  # prep, exec, post
+    performance_score: Optional[float] = None
+    
+
+@dataclass 
 class WorkflowMetrics:
-    """Metrics tracking for workflow execution."""
+    """Comprehensive metrics tracking for workflow execution."""
     start_time: float
     end_time: Optional[float] = None
     total_duration: float = 0.0
-    node_durations: Dict[str, float] = field(default_factory=dict)
-    node_retry_counts: Dict[str, int] = field(default_factory=dict)
+    
+    # Node-level metrics
+    node_metrics: Dict[str, NodeMetrics] = field(default_factory=dict)
+    node_durations: Dict[str, float] = field(default_factory=dict)  # Legacy compatibility
+    node_retry_counts: Dict[str, int] = field(default_factory=dict)  # Legacy compatibility
+    
+    # Overall workflow metrics
     success_rate: float = 0.0
+    completion_rate: float = 0.0  # Percentage of nodes completed
+    error_rate: float = 0.0
+    fallback_usage_rate: float = 0.0
+    
+    # Performance metrics
+    throughput: float = 0.0  # nodes per second
+    efficiency_score: float = 0.0  # overall efficiency rating
+    
+    # Resource usage
     memory_usage: Dict[str, Any] = field(default_factory=dict)
+    peak_memory: Optional[int] = None
+    memory_efficiency: Optional[float] = None
+    
+    # Error and reliability metrics
+    total_errors: int = 0
+    circuit_breaker_trips: int = 0
+    fallback_attempts: int = 0
+    
+    # Timing breakdown
+    setup_duration: float = 0.0
+    execution_duration: float = 0.0
+    cleanup_duration: float = 0.0
+    
+    # Quality metrics
+    data_quality_score: Optional[float] = None
+    result_completeness: float = 0.0
 
 
 class YouTubeSummarizerFlow(Flow):
@@ -271,6 +320,238 @@ class YouTubeSummarizerFlow(Flow):
             self._setup_monitoring()
         
         logger.info(f"YouTubeSummarizerFlow initialized with {len(self.nodes)} nodes (config: {self.config.execution_mode.value})")
+    
+    def _create_node_metrics(self, node_name: str) -> NodeMetrics:
+        """Create metrics tracking for a node."""
+        current_time = time.time()
+        
+        # Get circuit breaker state
+        cb_state = "closed"
+        if node_name in self.circuit_breakers:
+            cb_state = self.circuit_breakers[node_name].state.value
+        
+        # Get memory usage if available
+        memory_before = None
+        if self.memory_monitoring_available:
+            try:
+                memory_info = self.process.memory_info()
+                memory_before = memory_info.rss
+            except Exception:
+                pass
+        
+        return NodeMetrics(
+            node_name=node_name,
+            start_time=current_time,
+            memory_before=memory_before,
+            circuit_breaker_state=cb_state
+        )
+    
+    def _finalize_node_metrics(self, node_metrics: NodeMetrics, node_result: Dict[str, Any]) -> None:
+        """Finalize metrics for a completed node."""
+        current_time = time.time()
+        node_metrics.end_time = current_time
+        node_metrics.duration = current_time - node_metrics.start_time
+        
+        # Update status based on result
+        status = node_result.get('status', 'unknown')
+        node_metrics.status = status
+        
+        # Check if fallback was used
+        node_metrics.fallback_used = node_result.get('fallback_used', False)
+        
+        # Get retry count
+        exec_result = node_result.get('exec', {})
+        node_metrics.retry_count = exec_result.get('retry_count', 0)
+        
+        # Calculate phase durations if available
+        if 'prep' in node_result and 'exec' in node_result and 'post' in node_result:
+            prep_time = node_result['prep'].get('prep_timestamp')
+            exec_time = node_result['exec'].get('exec_timestamp') 
+            post_time = node_result['post'].get('post_timestamp')
+            
+            if prep_time and exec_time and post_time:
+                try:
+                    prep_dt = datetime.fromisoformat(prep_time.replace('Z', '+00:00'))
+                    exec_dt = datetime.fromisoformat(exec_time.replace('Z', '+00:00'))
+                    post_dt = datetime.fromisoformat(post_time.replace('Z', '+00:00'))
+                    
+                    node_metrics.phase_durations = {
+                        'prep': (exec_dt - prep_dt).total_seconds(),
+                        'exec': (post_dt - exec_dt).total_seconds(),
+                        'post': max(0, node_metrics.duration - (post_dt - prep_dt).total_seconds())
+                    }
+                except Exception:
+                    pass
+        
+        # Get final memory usage
+        if self.memory_monitoring_available:
+            try:
+                memory_info = self.process.memory_info()
+                node_metrics.memory_after = memory_info.rss
+                node_metrics.memory_peak = getattr(memory_info, 'peak_wset', memory_info.rss)
+            except Exception:
+                pass
+        
+        # Calculate performance score
+        node_metrics.performance_score = self._calculate_node_performance_score(node_metrics)
+        
+        # Update circuit breaker state
+        if node_metrics.node_name in self.circuit_breakers:
+            node_metrics.circuit_breaker_state = self.circuit_breakers[node_metrics.node_name].state.value
+    
+    def _calculate_node_performance_score(self, node_metrics: NodeMetrics) -> float:
+        """Calculate a performance score for a node (0-100)."""
+        try:
+            base_score = 100.0
+            
+            # Penalty for failures
+            if node_metrics.status == 'failed':
+                base_score = 0.0
+            elif node_metrics.status == 'partial_success':
+                base_score = 60.0
+            
+            # Penalty for retries
+            retry_penalty = min(30, node_metrics.retry_count * 10)
+            base_score -= retry_penalty
+            
+            # Penalty for fallback usage
+            if node_metrics.fallback_used:
+                base_score -= 20
+            
+            # Performance bonus/penalty based on duration
+            expected_durations = {
+                'YouTubeTranscriptNode': 30.0,
+                'SummarizationNode': 60.0,
+                'TimestampNode': 45.0,
+                'KeywordExtractionNode': 30.0
+            }
+            
+            expected = expected_durations.get(node_metrics.node_name, 45.0)
+            if node_metrics.duration <= expected:
+                # Bonus for fast execution
+                speed_bonus = min(20, (expected - node_metrics.duration) / expected * 20)
+                base_score += speed_bonus
+            else:
+                # Penalty for slow execution
+                speed_penalty = min(30, (node_metrics.duration - expected) / expected * 30)
+                base_score -= speed_penalty
+            
+            return max(0.0, min(100.0, base_score))
+            
+        except Exception:
+            return 50.0  # Default score on calculation error
+    
+    def _calculate_workflow_metrics(self) -> None:
+        """Calculate comprehensive workflow metrics."""
+        if not self.metrics:
+            return
+        
+        current_time = time.time()
+        self.metrics.total_duration = current_time - self.metrics.start_time
+        
+        # Calculate node-level aggregates
+        total_nodes = len(self.config.node_configs)
+        completed_nodes = len([m for m in self.metrics.node_metrics.values() if m.status in ['success', 'partial_success']])
+        failed_nodes = len([m for m in self.metrics.node_metrics.values() if m.status == 'failed'])
+        fallback_nodes = len([m for m in self.metrics.node_metrics.values() if m.fallback_used])
+        
+        # Basic rates
+        self.metrics.completion_rate = (completed_nodes / total_nodes) * 100 if total_nodes > 0 else 0
+        self.metrics.success_rate = (len([m for m in self.metrics.node_metrics.values() if m.status == 'success']) / total_nodes) * 100 if total_nodes > 0 else 0
+        self.metrics.error_rate = (failed_nodes / total_nodes) * 100 if total_nodes > 0 else 0
+        self.metrics.fallback_usage_rate = (fallback_nodes / total_nodes) * 100 if total_nodes > 0 else 0
+        
+        # Performance metrics
+        if self.metrics.execution_duration > 0:
+            self.metrics.throughput = completed_nodes / self.metrics.execution_duration
+        
+        # Calculate efficiency score
+        performance_scores = [m.performance_score for m in self.metrics.node_metrics.values() if m.performance_score is not None]
+        if performance_scores:
+            self.metrics.efficiency_score = sum(performance_scores) / len(performance_scores)
+        
+        # Memory efficiency
+        if self.metrics.peak_memory and self.metrics.memory_usage.get('rss'):
+            self.metrics.memory_efficiency = (self.metrics.memory_usage['rss'] / self.metrics.peak_memory) * 100
+        
+        # Error and reliability metrics
+        self.metrics.total_errors = sum(m.error_count for m in self.metrics.node_metrics.values())
+        self.metrics.fallback_attempts = sum(self.fallback_attempts.values())
+        
+        # Circuit breaker trips
+        self.metrics.circuit_breaker_trips = sum(
+            1 for cb in self.circuit_breakers.values() 
+            if cb.state != CircuitBreakerState.CLOSED
+        )
+        
+        # Result completeness
+        expected_outputs = ['transcript_data', 'summary_data', 'timestamp_data', 'keyword_data']
+        available_outputs = sum(1 for key in expected_outputs if key in self.store and self.store[key])
+        self.metrics.result_completeness = (available_outputs / len(expected_outputs)) * 100
+        
+        # Data quality score (basic implementation)
+        self.metrics.data_quality_score = self._calculate_data_quality_score()
+    
+    def _calculate_data_quality_score(self) -> float:
+        """Calculate a data quality score based on available results."""
+        try:
+            score = 0.0
+            max_score = 100.0
+            
+            # Transcript quality (25 points)
+            transcript_data = self.store.get('transcript_data', {})
+            if transcript_data:
+                transcript_text = transcript_data.get('transcript_text', '')
+                word_count = len(transcript_text.split()) if transcript_text else 0
+                if word_count > 100:
+                    score += 25.0
+                elif word_count > 50:
+                    score += 15.0
+                elif word_count > 0:
+                    score += 10.0
+            
+            # Summary quality (25 points)
+            summary_data = self.store.get('summary_data', {})
+            if summary_data:
+                summary_text = summary_data.get('summary_text', '')
+                word_count = len(summary_text.split()) if summary_text else 0
+                fallback_used = any(m.fallback_used for m in self.metrics.node_metrics.values() if m.node_name == 'SummarizationNode')
+                
+                if word_count > 200 and not fallback_used:
+                    score += 25.0
+                elif word_count > 100:
+                    score += 20.0
+                elif word_count > 50:
+                    score += 15.0
+                elif word_count > 0:
+                    score += 10.0
+            
+            # Timestamp quality (25 points)
+            timestamp_data = self.store.get('timestamp_data', {})
+            if timestamp_data:
+                timestamps = timestamp_data.get('timestamps', [])
+                if len(timestamps) >= 5:
+                    score += 25.0
+                elif len(timestamps) >= 3:
+                    score += 20.0
+                elif len(timestamps) >= 1:
+                    score += 15.0
+            
+            # Keyword quality (25 points)
+            keyword_data = self.store.get('keyword_data', {})
+            if keyword_data:
+                keywords = keyword_data.get('keywords', [])
+                if len(keywords) >= 5:
+                    score += 25.0
+                elif len(keywords) >= 3:
+                    score += 20.0
+                elif len(keywords) >= 1:
+                    score += 15.0
+            
+            return min(max_score, score)
+            
+        except Exception:
+            return 50.0  # Default score on calculation error
     
     def _create_default_config(
         self, 
@@ -621,11 +902,12 @@ class YouTubeSummarizerFlow(Flow):
         """
         logger.info(f"Starting YouTube summarizer workflow")
         
-        # Initialize workflow state
+        # Initialize workflow state and monitoring
+        setup_start_time = time.time()
         if self.enable_monitoring:
-            self.metrics = WorkflowMetrics(start_time=time.time())
+            self.metrics = WorkflowMetrics(start_time=setup_start_time)
         
-        workflow_start_time = time.time()
+        workflow_start_time = setup_start_time
         
         try:
             # Validate input
@@ -635,17 +917,30 @@ class YouTubeSummarizerFlow(Flow):
             self.store = Store()
             self.store.update(input_data)
             
+            # Record setup duration
+            if self.enable_monitoring and self.metrics:
+                self.metrics.setup_duration = time.time() - setup_start_time
+            
             # Execute workflow with timeout
             result = self._execute_workflow_with_timeout()
             
             # Calculate final metrics
             if self.enable_monitoring:
+                self._calculate_workflow_metrics()
                 self._finalize_metrics(success=True)
             
             # Prepare final result
             final_result = self._prepare_final_result(result)
             
-            logger.info(f"Workflow completed successfully in {time.time() - workflow_start_time:.2f}s")
+            total_duration = time.time() - workflow_start_time
+            logger.info(f"Workflow completed successfully in {total_duration:.2f}s")
+            
+            # Log performance summary
+            if self.enable_monitoring and self.metrics:
+                logger.info(f"Performance summary: efficiency={self.metrics.efficiency_score:.1f}%, "
+                           f"completion={self.metrics.completion_rate:.1f}%, "
+                           f"fallback_usage={self.metrics.fallback_usage_rate:.1f}%")
+            
             return final_result
             
         except Exception as e:
@@ -698,12 +993,23 @@ class YouTubeSummarizerFlow(Flow):
         raise RuntimeError("Workflow failed after all retries")
     
     def _execute_nodes_sequence(self) -> Dict[str, Any]:
-        """Execute all nodes in the configured sequence with enhanced error handling."""
+        """Execute all nodes in the configured sequence with enhanced monitoring."""
         results = {}
+        execution_start_time = time.time()
+        
+        # Update metrics with execution start
+        if self.enable_monitoring and self.metrics:
+            self.metrics.execution_duration = 0.0  # Will be updated at end
         
         for node in self.nodes:
-            node_start_time = time.time()
             node_config = self.config.node_configs.get(node.name)
+            
+            # Create metrics tracking for this node
+            node_metrics = None
+            if self.enable_monitoring:
+                node_metrics = self._create_node_metrics(node.name)
+                self.metrics.node_metrics[node.name] = node_metrics
+                node_metrics.status = "running"
             
             try:
                 logger.info(f"Executing node: {node.name}")
@@ -712,6 +1018,13 @@ class YouTubeSummarizerFlow(Flow):
                 if node.name in self.circuit_breakers:
                     if not self.circuit_breakers[node.name].can_execute():
                         logger.warning(f"Circuit breaker open for {node.name}, skipping execution")
+                        
+                        # Update metrics for skipped node
+                        if node_metrics:
+                            node_metrics.status = "skipped_circuit_breaker"
+                            node_metrics.end_time = time.time()
+                            node_metrics.duration = node_metrics.end_time - node_metrics.start_time
+                        
                         results[node.name] = {
                             'status': 'skipped_circuit_breaker',
                             'timestamp': datetime.utcnow().isoformat(),
@@ -726,9 +1039,17 @@ class YouTubeSummarizerFlow(Flow):
                 # Validate data flow requirements before execution
                 self._validate_data_flow(node.name)
                 
-                # Execute node with enhanced error handling
+                # Execute node with enhanced error handling and monitoring
                 node_result = self._execute_single_node_with_fallback(node, node_config)
                 results[node.name] = node_result
+                
+                # Update node metrics
+                if node_metrics:
+                    self._finalize_node_metrics(node_metrics, node_result)
+                    
+                    # Update legacy metrics for compatibility
+                    self.metrics.node_durations[node.name] = node_metrics.duration
+                    self.metrics.node_retry_counts[node.name] = node_metrics.retry_count
                 
                 # Record success in circuit breaker
                 if node.name in self.circuit_breakers and node_result.get('status') == 'success':
@@ -739,6 +1060,10 @@ class YouTubeSummarizerFlow(Flow):
                     # Record failure in circuit breaker
                     if node.name in self.circuit_breakers:
                         self.circuit_breakers[node.name].record_failure()
+                    
+                    # Update error count in metrics
+                    if node_metrics:
+                        node_metrics.error_count += 1
                     
                     # Check if this is a required node
                     if node_config and node_config.required:
@@ -753,21 +1078,19 @@ class YouTubeSummarizerFlow(Flow):
                 if node_result.get('post', {}).get('post_status') == 'success':
                     self._map_output_data(node.name, node_result['post'])
                 
-                # Track metrics for execution
-                if self.enable_monitoring:
-                    node_duration = time.time() - node_start_time
-                    self.metrics.node_durations[node.name] = node_duration
-                    
-                    # Track retry count from exec result
-                    exec_result = node_result.get('exec', {})
-                    retry_count = exec_result.get('retry_count', 0)
-                    self.metrics.node_retry_counts[node.name] = retry_count
-                
-                logger.info(f"Node {node.name} completed with status: {node_result.get('status')}")
+                logger.info(f"Node {node.name} completed with status: {node_result.get('status')} "
+                           f"in {node_metrics.duration:.2f}s" if node_metrics else "")
                 
             except Exception as e:
                 error_msg = f"Node {node.name} execution failed: {str(e)}"
                 logger.error(error_msg)
+                
+                # Update node metrics for failure
+                if node_metrics:
+                    node_metrics.status = "failed"
+                    node_metrics.error_count += 1
+                    node_metrics.end_time = time.time()
+                    node_metrics.duration = node_metrics.end_time - node_metrics.start_time
                 
                 # Record failure in circuit breaker
                 if node.name in self.circuit_breakers:
@@ -792,8 +1115,17 @@ class YouTubeSummarizerFlow(Flow):
                     logger.warning(f"Optional node {node.name} failed, continuing: {error_msg}")
                     continue
         
+        # Update execution duration
+        if self.enable_monitoring and self.metrics:
+            self.metrics.execution_duration = time.time() - execution_start_time
+        
         # Clean up temporary data after all nodes complete
+        cleanup_start_time = time.time()
         self._cleanup_store_data()
+        
+        # Update cleanup duration
+        if self.enable_monitoring and self.metrics:
+            self.metrics.cleanup_duration = time.time() - cleanup_start_time
         
         return results
     
@@ -1059,14 +1391,62 @@ class YouTubeSummarizerFlow(Flow):
                 'timestamp': datetime.utcnow().isoformat()
             }
             
-            # Add monitoring data if available
+            # Add comprehensive monitoring data if available
             if self.enable_monitoring and self.metrics:
                 final_result['performance'] = {
+                    # Timing metrics
                     'total_duration': self.metrics.total_duration,
+                    'setup_duration': self.metrics.setup_duration,
+                    'execution_duration': self.metrics.execution_duration,
+                    'cleanup_duration': self.metrics.cleanup_duration,
+                    
+                    # Legacy compatibility
                     'node_durations': self.metrics.node_durations,
                     'retry_counts': self.metrics.node_retry_counts,
-                    'success_rate': self.metrics.success_rate
+                    
+                    # Overall metrics
+                    'success_rate': self.metrics.success_rate,
+                    'completion_rate': self.metrics.completion_rate,
+                    'error_rate': self.metrics.error_rate,
+                    'fallback_usage_rate': self.metrics.fallback_usage_rate,
+                    'efficiency_score': self.metrics.efficiency_score,
+                    'throughput': self.metrics.throughput,
+                    
+                    # Quality metrics
+                    'data_quality_score': self.metrics.data_quality_score,
+                    'result_completeness': self.metrics.result_completeness,
+                    
+                    # Resource usage
+                    'memory_usage': self.metrics.memory_usage,
+                    'peak_memory': self.metrics.peak_memory,
+                    'memory_efficiency': self.metrics.memory_efficiency,
+                    
+                    # Reliability metrics
+                    'total_errors': self.metrics.total_errors,
+                    'circuit_breaker_trips': self.metrics.circuit_breaker_trips,
+                    'fallback_attempts': self.metrics.fallback_attempts
                 }
+                
+                # Add detailed node metrics
+                final_result['node_performance'] = {}
+                for node_name, node_metrics in self.metrics.node_metrics.items():
+                    final_result['node_performance'][node_name] = {
+                        'duration': node_metrics.duration,
+                        'status': node_metrics.status,
+                        'retry_count': node_metrics.retry_count,
+                        'fallback_used': node_metrics.fallback_used,
+                        'performance_score': node_metrics.performance_score,
+                        'circuit_breaker_state': node_metrics.circuit_breaker_state,
+                        'phase_durations': node_metrics.phase_durations,
+                        'error_count': node_metrics.error_count
+                    }
+                    
+                    # Add memory metrics if available
+                    if node_metrics.memory_before and node_metrics.memory_after:
+                        final_result['node_performance'][node_name]['memory_delta'] = (
+                            node_metrics.memory_after - node_metrics.memory_before
+                        )
+                        final_result['node_performance'][node_name]['memory_peak'] = node_metrics.memory_peak
             
             return final_result
             
@@ -1126,24 +1506,142 @@ class YouTubeSummarizerFlow(Flow):
                    f"success={success}, retries={sum(self.metrics.node_retry_counts.values())}")
     
     def get_workflow_status(self) -> Dict[str, Any]:
-        """Get current workflow status and metrics."""
+        """Get comprehensive real-time workflow status and metrics."""
         if not self.metrics:
-            return {'status': 'not_started'}
+            return {
+                'status': 'not_started',
+                'timestamp': datetime.utcnow().isoformat()
+            }
         
         current_time = time.time()
         elapsed_time = current_time - self.metrics.start_time
         
-        return {
+        # Calculate current progress
+        completed_nodes = len([m for m in self.metrics.node_metrics.values() 
+                              if m.status in ['success', 'partial_success', 'failed', 'skipped_circuit_breaker']])
+        total_nodes = len(self.config.node_configs)
+        progress_percent = (completed_nodes / total_nodes) * 100 if total_nodes > 0 else 0
+        
+        # Find current node
+        current_node = None
+        running_nodes = [m for m in self.metrics.node_metrics.values() if m.status == 'running']
+        if running_nodes:
+            current_node = running_nodes[0].node_name
+        elif completed_nodes < total_nodes:
+            # Next node to execute
+            executed_nodes = set(self.metrics.node_metrics.keys())
+            for node in self.nodes:
+                if node.name not in executed_nodes:
+                    current_node = node.name
+                    break
+        
+        # Calculate performance metrics
+        success_nodes = len([m for m in self.metrics.node_metrics.values() if m.status == 'success'])
+        failed_nodes = len([m for m in self.metrics.node_metrics.values() if m.status == 'failed'])
+        fallback_nodes = len([m for m in self.metrics.node_metrics.values() if m.fallback_used])
+        
+        # Circuit breaker status
+        circuit_breaker_status = {}
+        for node_name, cb in self.circuit_breakers.items():
+            circuit_breaker_status[node_name] = {
+                'state': cb.state.value,
+                'failure_count': cb.failure_count,
+                'consecutive_failures': cb.consecutive_failures
+            }
+        
+        # Node status summary
+        node_status = {}
+        for node_name, metrics in self.metrics.node_metrics.items():
+            node_status[node_name] = {
+                'status': metrics.status,
+                'duration': metrics.duration,
+                'performance_score': metrics.performance_score,
+                'retry_count': metrics.retry_count,
+                'fallback_used': metrics.fallback_used,
+                'progress_percent': 100 if metrics.end_time else 
+                                  ((current_time - metrics.start_time) / 60 * 100) if metrics.status == 'running' else 0
+            }
+        
+        # Resource usage
+        resource_usage = {}
+        if self.memory_monitoring_available:
+            try:
+                memory_info = self.process.memory_info()
+                resource_usage = {
+                    'current_memory': memory_info.rss,
+                    'peak_memory': getattr(memory_info, 'peak_wset', memory_info.rss),
+                    'memory_percent': self.process.memory_percent()
+                }
+            except Exception:
+                pass
+        
+        status = {
+            # Basic status
             'status': 'running' if not self.metrics.end_time else 'completed',
+            'timestamp': datetime.utcnow().isoformat(),
             'elapsed_time': elapsed_time,
-            'completed_nodes': len(self.metrics.node_durations),
-            'total_nodes': len(self.nodes),
-            'progress_percent': (len(self.metrics.node_durations) / len(self.nodes)) * 100,
-            'current_node': self.nodes[len(self.metrics.node_durations)].name if len(self.metrics.node_durations) < len(self.nodes) else None,
-            'error_count': len(self.workflow_errors),
-            'retry_count': sum(self.metrics.node_retry_counts.values()),
-            'memory_usage': self.metrics.memory_usage
+            
+            # Progress information
+            'progress': {
+                'completed_nodes': completed_nodes,
+                'total_nodes': total_nodes,
+                'progress_percent': progress_percent,
+                'current_node': current_node,
+                'success_nodes': success_nodes,
+                'failed_nodes': failed_nodes,
+                'fallback_nodes': fallback_nodes
+            },
+            
+            # Performance metrics (calculated in real-time)
+            'performance': {
+                'efficiency_score': self.metrics.efficiency_score,
+                'throughput': completed_nodes / elapsed_time if elapsed_time > 0 else 0,
+                'success_rate': (success_nodes / completed_nodes) * 100 if completed_nodes > 0 else 0,
+                'error_rate': (failed_nodes / completed_nodes) * 100 if completed_nodes > 0 else 0,
+                'fallback_usage_rate': (fallback_nodes / completed_nodes) * 100 if completed_nodes > 0 else 0
+            },
+            
+            # Detailed node status
+            'nodes': node_status,
+            
+            # Circuit breaker status
+            'circuit_breakers': circuit_breaker_status,
+            
+            # Resource usage
+            'resources': resource_usage,
+            
+            # Error summary
+            'errors': {
+                'total_errors': len(self.workflow_errors),
+                'total_retries': sum(self.metrics.node_retry_counts.values()),
+                'total_fallback_attempts': sum(self.fallback_attempts.values()),
+                'recent_errors': [err.__dict__ for err in self.workflow_errors[-3:]]  # Last 3 errors
+            },
+            
+            # Timing breakdown
+            'timing': {
+                'setup_duration': self.metrics.setup_duration,
+                'execution_duration': current_time - (self.metrics.start_time + self.metrics.setup_duration) if self.metrics.setup_duration > 0 else 0,
+                'estimated_remaining': self._estimate_remaining_time(elapsed_time, progress_percent)
+            }
         }
+        
+        return status
+    
+    def _estimate_remaining_time(self, elapsed_time: float, progress_percent: float) -> Optional[float]:
+        """Estimate remaining execution time based on current progress."""
+        try:
+            if progress_percent <= 0:
+                return None
+            
+            # Simple linear estimation
+            total_estimated_time = elapsed_time / (progress_percent / 100)
+            remaining_time = total_estimated_time - elapsed_time
+            
+            return max(0, remaining_time)
+            
+        except Exception:
+            return None
     
     def reset_workflow(self) -> None:
         """Reset workflow state for reuse."""
