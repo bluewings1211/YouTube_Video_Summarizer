@@ -25,7 +25,7 @@
 
 - [ ] 1.0 Enhanced YouTube Transcript Acquisition System
   - [x] 1.1 Analyze current youtube_api.py and understand existing transcript acquisition logic
-  - [ ] 1.2 Implement language detection function to identify English vs Chinese videos using YouTube metadata
+  - [x] 1.2 Implement language detection function to identify English vs Chinese videos using YouTube metadata
   - [ ] 1.3 Create three-tier transcript acquisition strategy (manual > auto-generated > translated)
   - [ ] 1.4 Add intelligent fallback logic to automatically try next tier when current tier fails
   - [ ] 1.5 Implement specific exception handling for TranscriptsDisabled, NoTranscriptFound, and other YouTube API errors
