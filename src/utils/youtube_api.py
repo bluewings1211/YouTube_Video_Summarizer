@@ -10,6 +10,9 @@ import logging
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime
 import re
+import json
+import urllib.request
+import urllib.parse
 
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -36,17 +39,173 @@ class YouTubeTranscriptError(Exception):
     pass
 
 
+class YouTubeVideoMetadataExtractor:
+    """Extracts video metadata from YouTube."""
+    
+    def __init__(self):
+        self.user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        )
+    
+    def extract_video_metadata(self, video_id: str) -> Dict[str, Any]:
+        """
+        Extract video metadata including title, duration, and language.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Dictionary containing video metadata
+            
+        Raises:
+            YouTubeTranscriptError: If metadata cannot be extracted
+        """
+        if not video_id:
+            raise YouTubeTranscriptError("Video ID is required")
+            
+        if not YouTubeURLValidator._is_valid_video_id(video_id):
+            raise YouTubeTranscriptError(f"Invalid video ID format: {video_id}")
+        
+        try:
+            # Fetch video page to extract metadata
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Create request with user agent
+            request = urllib.request.Request(url)
+            request.add_header('User-Agent', self.user_agent)
+            
+            # Get page content
+            with urllib.request.urlopen(request) as response:
+                page_content = response.read().decode('utf-8')
+            
+            # Extract metadata from page
+            metadata = self._parse_metadata_from_page(page_content, video_id)
+            
+            return metadata
+            
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise YouTubeTranscriptError("Video not found")
+            elif e.code == 403:
+                raise YouTubeTranscriptError("Access denied to video")
+            else:
+                raise YouTubeTranscriptError(f"HTTP error {e.code}: {e.reason}")
+                
+        except Exception as e:
+            logger.error(f"Error extracting metadata for {video_id}: {str(e)}")
+            raise YouTubeTranscriptError(f"Failed to extract video metadata: {str(e)}")
+    
+    def _parse_metadata_from_page(self, page_content: str, video_id: str) -> Dict[str, Any]:
+        """
+        Parse metadata from YouTube page content.
+        
+        Args:
+            page_content: HTML content of YouTube page
+            video_id: Video ID for reference
+            
+        Returns:
+            Dictionary containing parsed metadata
+        """
+        metadata = {
+            'video_id': video_id,
+            'title': None,
+            'duration_seconds': None,
+            'language': None,
+            'view_count': None,
+            'upload_date': None,
+            'channel_name': None,
+            'description': None,
+            'is_live': False,
+            'is_private': False,
+            'extraction_timestamp': datetime.utcnow().isoformat()
+        }
+        
+        try:
+            # Extract title
+            title_match = re.search(r'"title":"([^"]+)"', page_content)
+            if title_match:
+                metadata['title'] = title_match.group(1).replace('\\u0026', '&')
+            
+            # Extract duration (in seconds)
+            duration_match = re.search(r'"lengthSeconds":"(\d+)"', page_content)
+            if duration_match:
+                metadata['duration_seconds'] = int(duration_match.group(1))
+            
+            # Extract language
+            lang_match = re.search(r'"defaultAudioLanguage":"([^"]+)"', page_content)
+            if lang_match:
+                metadata['language'] = lang_match.group(1)
+            else:
+                # Try alternative language extraction
+                lang_match = re.search(r'"lang":"([^"]+)"', page_content)
+                if lang_match:
+                    metadata['language'] = lang_match.group(1)
+            
+            # Extract view count
+            view_match = re.search(r'"viewCount":"(\d+)"', page_content)
+            if view_match:
+                metadata['view_count'] = int(view_match.group(1))
+            
+            # Extract channel name
+            channel_match = re.search(r'"author":"([^"]+)"', page_content)
+            if channel_match:
+                metadata['channel_name'] = channel_match.group(1)
+            
+            # Check if video is live
+            if '"isLiveContent":true' in page_content:
+                metadata['is_live'] = True
+            
+            # Check if video is private (basic check)
+            if 'Private video' in page_content or 'This video is private' in page_content:
+                metadata['is_private'] = True
+            
+            # Extract description (first part)
+            desc_match = re.search(r'"shortDescription":"([^"]+)"', page_content)
+            if desc_match:
+                metadata['description'] = desc_match.group(1)[:500]  # Limit to 500 chars
+            
+        except Exception as e:
+            logger.warning(f"Error parsing some metadata fields for {video_id}: {str(e)}")
+        
+        return metadata
+    
+    def get_video_duration_formatted(self, duration_seconds: int) -> str:
+        """
+        Format duration in seconds to human-readable format.
+        
+        Args:
+            duration_seconds: Duration in seconds
+            
+        Returns:
+            Formatted duration string (e.g., "5:30", "1:02:30")
+        """
+        if duration_seconds is None:
+            return "Unknown"
+            
+        hours = duration_seconds // 3600
+        minutes = (duration_seconds % 3600) // 60
+        seconds = duration_seconds % 60
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
+
+
 class YouTubeTranscriptFetcher:
     """Handles YouTube transcript fetching and processing."""
     
     def __init__(self):
         self.formatter = TextFormatter()
         self.api = YouTubeTranscriptApi
+        self.metadata_extractor = YouTubeVideoMetadataExtractor()
     
     def fetch_transcript(
         self, 
         video_id: str, 
-        languages: Optional[List[str]] = None
+        languages: Optional[List[str]] = None,
+        include_metadata: bool = True
     ) -> Dict[str, Any]:
         """
         Fetch transcript for a YouTube video.
@@ -54,6 +213,7 @@ class YouTubeTranscriptFetcher:
         Args:
             video_id: YouTube video ID
             languages: Preferred languages for transcript (default: ['en'])
+            include_metadata: Whether to include video metadata (default: True)
             
         Returns:
             Dictionary containing transcript data and metadata
@@ -81,7 +241,7 @@ class YouTubeTranscriptFetcher:
             duration = self._calculate_duration(transcript_list)
             word_count = len(formatted_transcript.split())
             
-            return {
+            result = {
                 'video_id': video_id,
                 'transcript': formatted_transcript,
                 'raw_transcript': transcript_list,
@@ -91,6 +251,22 @@ class YouTubeTranscriptFetcher:
                 'fetch_timestamp': datetime.utcnow().isoformat(),
                 'success': True
             }
+            
+            # Include video metadata if requested
+            if include_metadata:
+                try:
+                    video_metadata = self.metadata_extractor.extract_video_metadata(video_id)
+                    result['video_metadata'] = video_metadata
+                    
+                    # Update duration if available from metadata (more accurate)
+                    if video_metadata.get('duration_seconds'):
+                        result['duration_seconds'] = video_metadata['duration_seconds']
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to extract video metadata for {video_id}: {str(e)}")
+                    result['video_metadata'] = None
+            
+            return result
             
         except TranscriptsDisabled:
             logger.error(f"Transcripts disabled for video {video_id}")
@@ -117,7 +293,8 @@ class YouTubeTranscriptFetcher:
     def fetch_transcript_from_url(
         self, 
         url: str, 
-        languages: Optional[List[str]] = None
+        languages: Optional[List[str]] = None,
+        include_metadata: bool = True
     ) -> Dict[str, Any]:
         """
         Fetch transcript from a YouTube URL.
@@ -125,6 +302,7 @@ class YouTubeTranscriptFetcher:
         Args:
             url: YouTube URL
             languages: Preferred languages for transcript
+            include_metadata: Whether to include video metadata
             
         Returns:
             Dictionary containing transcript data and metadata
@@ -138,7 +316,7 @@ class YouTubeTranscriptFetcher:
         if not is_valid or not video_id:
             raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
             
-        return self.fetch_transcript(video_id, languages)
+        return self.fetch_transcript(video_id, languages, include_metadata)
     
     def get_available_transcripts(self, video_id: str) -> List[Dict[str, Any]]:
         """
@@ -180,6 +358,42 @@ class YouTubeTranscriptFetcher:
         except Exception as e:
             logger.error(f"Error getting available transcripts for {video_id}: {str(e)}")
             raise YouTubeTranscriptError(f"Failed to get available transcripts: {str(e)}")
+    
+    def get_video_metadata(self, video_id: str) -> Dict[str, Any]:
+        """
+        Get video metadata only (without transcript).
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Dictionary containing video metadata
+            
+        Raises:
+            YouTubeTranscriptError: If metadata cannot be extracted
+        """
+        return self.metadata_extractor.extract_video_metadata(video_id)
+    
+    def get_video_metadata_from_url(self, url: str) -> Dict[str, Any]:
+        """
+        Get video metadata from a YouTube URL.
+        
+        Args:
+            url: YouTube URL
+            
+        Returns:
+            Dictionary containing video metadata
+            
+        Raises:
+            YouTubeTranscriptError: If URL is invalid or metadata cannot be extracted
+        """
+        # Validate URL and extract video ID
+        is_valid, video_id = YouTubeURLValidator.validate_and_extract(url)
+        
+        if not is_valid or not video_id:
+            raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
+            
+        return self.get_video_metadata(video_id)
     
     def _calculate_duration(self, transcript_list: List[Dict[str, Any]]) -> float:
         """
@@ -234,7 +448,8 @@ class YouTubeTranscriptFetcher:
 # Convenience functions
 def fetch_youtube_transcript(
     video_id: str, 
-    languages: Optional[List[str]] = None
+    languages: Optional[List[str]] = None,
+    include_metadata: bool = True
 ) -> Dict[str, Any]:
     """
     Convenience function to fetch YouTube transcript.
@@ -242,17 +457,19 @@ def fetch_youtube_transcript(
     Args:
         video_id: YouTube video ID
         languages: Preferred languages for transcript
+        include_metadata: Whether to include video metadata
         
     Returns:
         Dictionary containing transcript data and metadata
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.fetch_transcript(video_id, languages)
+    return fetcher.fetch_transcript(video_id, languages, include_metadata)
 
 
 def fetch_youtube_transcript_from_url(
     url: str, 
-    languages: Optional[List[str]] = None
+    languages: Optional[List[str]] = None,
+    include_metadata: bool = True
 ) -> Dict[str, Any]:
     """
     Convenience function to fetch YouTube transcript from URL.
@@ -260,12 +477,13 @@ def fetch_youtube_transcript_from_url(
     Args:
         url: YouTube URL
         languages: Preferred languages for transcript
+        include_metadata: Whether to include video metadata
         
     Returns:
         Dictionary containing transcript data and metadata
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.fetch_transcript_from_url(url, languages)
+    return fetcher.fetch_transcript_from_url(url, languages, include_metadata)
 
 
 def get_available_youtube_transcripts(video_id: str) -> List[Dict[str, Any]]:
@@ -280,3 +498,31 @@ def get_available_youtube_transcripts(video_id: str) -> List[Dict[str, Any]]:
     """
     fetcher = YouTubeTranscriptFetcher()
     return fetcher.get_available_transcripts(video_id)
+
+
+def get_youtube_video_metadata(video_id: str) -> Dict[str, Any]:
+    """
+    Convenience function to get YouTube video metadata.
+    
+    Args:
+        video_id: YouTube video ID
+        
+    Returns:
+        Dictionary containing video metadata
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.get_video_metadata(video_id)
+
+
+def get_youtube_video_metadata_from_url(url: str) -> Dict[str, Any]:
+    """
+    Convenience function to get YouTube video metadata from URL.
+    
+    Args:
+        url: YouTube URL
+        
+    Returns:
+        Dictionary containing video metadata
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.get_video_metadata_from_url(url)
