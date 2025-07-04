@@ -37,3 +37,8 @@ python-json-logger>=2.0.7
 
 # Container Health Checks
 psutil>=5.9.0
+
+# Performance Testing & Benchmarking
+locust>=2.17.0
+pytest-benchmark>=4.0.0
+memory-profiler>=0.61.0
