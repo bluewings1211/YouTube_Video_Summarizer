@@ -39,7 +39,7 @@
   - [x] 2.2 Create YouTube transcript fetching functionality in utils/youtube_api.py
   - [x] 2.3 Add video metadata extraction (title, duration, language detection)
   - [x] 2.4 Implement error detection for unsupported video types (private, live, no transcripts)
-  - [ ] 2.5 Add video duration validation (30-minute limit)
+  - [x] 2.5 Add video duration validation (30-minute limit)
   - [ ] 2.6 Create comprehensive unit tests for all YouTube API utilities
 
 - [ ] 3.0 PocketFlow Nodes Implementation

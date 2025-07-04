@@ -59,6 +59,11 @@ class NoTranscriptAvailableError(UnsupportedVideoTypeError):
     pass
 
 
+class VideoTooLongError(UnsupportedVideoTypeError):
+    """Raised when video duration exceeds the maximum allowed limit."""
+    pass
+
+
 class YouTubeVideoMetadataExtractor:
     """Extracts video metadata from YouTube."""
     
@@ -212,12 +217,17 @@ class YouTubeVideoMetadataExtractor:
         else:
             return f"{minutes}:{seconds:02d}"
     
-    def detect_unsupported_video_type(self, video_id: str) -> Dict[str, Any]:
+    def detect_unsupported_video_type(
+        self, 
+        video_id: str, 
+        max_duration_seconds: int = 1800
+    ) -> Dict[str, Any]:
         """
         Detect if a video has unsupported characteristics for transcript extraction.
         
         Args:
             video_id: YouTube video ID
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
             
         Returns:
             Dictionary containing video support status and details
@@ -250,6 +260,25 @@ class YouTubeVideoMetadataExtractor:
                 })
                 is_supported = False
             
+            # Check video duration
+            duration_seconds = metadata.get('duration_seconds')
+            if duration_seconds is not None:
+                if duration_seconds > max_duration_seconds:
+                    duration_formatted = self.get_video_duration_formatted(duration_seconds)
+                    max_duration_formatted = self.get_video_duration_formatted(max_duration_seconds)
+                    issues.append({
+                        'type': 'too_long',
+                        'severity': 'critical',
+                        'message': f'Video duration ({duration_formatted}) exceeds maximum allowed duration ({max_duration_formatted})'
+                    })
+                    is_supported = False
+            else:
+                issues.append({
+                    'type': 'no_duration',
+                    'severity': 'warning',
+                    'message': 'Video duration could not be determined'
+                })
+            
             # Check if video has no title (might be unavailable)
             if not metadata.get('title'):
                 issues.append({
@@ -258,19 +287,12 @@ class YouTubeVideoMetadataExtractor:
                     'message': 'Video title could not be extracted, may be unavailable'
                 })
             
-            # Check if video has no duration (might be unavailable)
-            if not metadata.get('duration_seconds'):
-                issues.append({
-                    'type': 'no_duration',
-                    'severity': 'warning',
-                    'message': 'Video duration could not be determined'
-                })
-            
             return {
                 'video_id': video_id,
                 'is_supported': is_supported,
                 'issues': issues,
                 'metadata': metadata,
+                'max_duration_seconds': max_duration_seconds,
                 'check_timestamp': datetime.utcnow().isoformat()
             }
             
@@ -319,6 +341,97 @@ class YouTubeVideoMetadataExtractor:
         except Exception as e:
             logger.error(f"Error checking transcript availability for {video_id}: {str(e)}")
             raise YouTubeTranscriptError(f"Failed to check transcript availability: {str(e)}")
+    
+    def validate_video_duration(
+        self, 
+        video_id: str, 
+        max_duration_seconds: int = 1800
+    ) -> Dict[str, Any]:
+        """
+        Validate that video duration is within acceptable limits.
+        
+        Args:
+            video_id: YouTube video ID
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+            
+        Returns:
+            Dictionary containing duration validation results
+            
+        Raises:
+            YouTubeTranscriptError: If video cannot be analyzed
+            VideoTooLongError: If video exceeds duration limit
+        """
+        try:
+            # Extract metadata to get duration
+            metadata = self.extract_video_metadata(video_id)
+            duration_seconds = metadata.get('duration_seconds')
+            
+            if duration_seconds is None:
+                return {
+                    'video_id': video_id,
+                    'is_valid_duration': False,
+                    'duration_seconds': None,
+                    'max_duration_seconds': max_duration_seconds,
+                    'duration_formatted': 'Unknown',
+                    'error': 'Could not determine video duration',
+                    'check_timestamp': datetime.utcnow().isoformat()
+                }
+            
+            is_valid = duration_seconds <= max_duration_seconds
+            duration_formatted = self.get_video_duration_formatted(duration_seconds)
+            max_duration_formatted = self.get_video_duration_formatted(max_duration_seconds)
+            
+            result = {
+                'video_id': video_id,
+                'is_valid_duration': is_valid,
+                'duration_seconds': duration_seconds,
+                'max_duration_seconds': max_duration_seconds,
+                'duration_formatted': duration_formatted,
+                'max_duration_formatted': max_duration_formatted,
+                'check_timestamp': datetime.utcnow().isoformat()
+            }
+            
+            if not is_valid:
+                result['error'] = f"Video duration ({duration_formatted}) exceeds maximum allowed duration ({max_duration_formatted})"
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error validating duration for {video_id}: {str(e)}")
+            raise YouTubeTranscriptError(f"Failed to validate video duration: {str(e)}")
+    
+    def check_duration_limit(
+        self, 
+        video_id: str, 
+        max_duration_seconds: int = 1800,
+        raise_on_exceeded: bool = True
+    ) -> bool:
+        """
+        Check if video duration is within limits.
+        
+        Args:
+            video_id: YouTube video ID
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+            raise_on_exceeded: Whether to raise exception if duration is exceeded
+            
+        Returns:
+            True if duration is within limits, False otherwise
+            
+        Raises:
+            VideoTooLongError: If video exceeds duration and raise_on_exceeded is True
+            YouTubeTranscriptError: If video cannot be analyzed
+        """
+        validation_result = self.validate_video_duration(video_id, max_duration_seconds)
+        
+        if not validation_result['is_valid_duration'] and raise_on_exceeded:
+            duration_formatted = validation_result.get('duration_formatted', 'Unknown')
+            max_duration_formatted = validation_result.get('max_duration_formatted', 'Unknown')
+            
+            raise VideoTooLongError(
+                f"Video duration ({duration_formatted}) exceeds maximum allowed duration ({max_duration_formatted})"
+            )
+        
+        return validation_result['is_valid_duration']
 
 
 class YouTubeTranscriptFetcher:
@@ -334,7 +447,8 @@ class YouTubeTranscriptFetcher:
         video_id: str, 
         languages: Optional[List[str]] = None,
         include_metadata: bool = True,
-        check_unsupported: bool = True
+        check_unsupported: bool = True,
+        max_duration_seconds: int = 1800
     ) -> Dict[str, Any]:
         """
         Fetch transcript for a YouTube video.
@@ -344,6 +458,7 @@ class YouTubeTranscriptFetcher:
             languages: Preferred languages for transcript (default: ['en'])
             include_metadata: Whether to include video metadata (default: True)
             check_unsupported: Whether to check for unsupported video types (default: True)
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
             
         Returns:
             Dictionary containing transcript data and metadata
@@ -351,6 +466,7 @@ class YouTubeTranscriptFetcher:
         Raises:
             YouTubeTranscriptError: If transcript cannot be fetched
             UnsupportedVideoTypeError: If video type is not supported
+            VideoTooLongError: If video exceeds duration limit
         """
         if not video_id:
             raise YouTubeTranscriptError("Video ID is required")
@@ -364,7 +480,9 @@ class YouTubeTranscriptFetcher:
         # Check for unsupported video types first
         if check_unsupported:
             try:
-                support_status = self.metadata_extractor.detect_unsupported_video_type(video_id)
+                support_status = self.metadata_extractor.detect_unsupported_video_type(
+                    video_id, max_duration_seconds
+                )
                 
                 if not support_status['is_supported']:
                     for issue in support_status['issues']:
@@ -372,8 +490,10 @@ class YouTubeTranscriptFetcher:
                             raise PrivateVideoError("Video is private and cannot be accessed")
                         elif issue['type'] == 'live':
                             raise LiveVideoError("Live videos do not have transcripts available")
+                        elif issue['type'] == 'too_long':
+                            raise VideoTooLongError(issue['message'])
                         
-            except (PrivateVideoError, LiveVideoError):
+            except (PrivateVideoError, LiveVideoError, VideoTooLongError):
                 raise  # Re-raise these specific errors
             except Exception as e:
                 logger.warning(f"Could not check video support status for {video_id}: {str(e)}")
@@ -444,7 +564,8 @@ class YouTubeTranscriptFetcher:
         url: str, 
         languages: Optional[List[str]] = None,
         include_metadata: bool = True,
-        check_unsupported: bool = True
+        check_unsupported: bool = True,
+        max_duration_seconds: int = 1800
     ) -> Dict[str, Any]:
         """
         Fetch transcript from a YouTube URL.
@@ -454,6 +575,7 @@ class YouTubeTranscriptFetcher:
             languages: Preferred languages for transcript
             include_metadata: Whether to include video metadata
             check_unsupported: Whether to check for unsupported video types
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
             
         Returns:
             Dictionary containing transcript data and metadata
@@ -461,6 +583,7 @@ class YouTubeTranscriptFetcher:
         Raises:
             YouTubeTranscriptError: If URL is invalid or transcript cannot be fetched
             UnsupportedVideoTypeError: If video type is not supported
+            VideoTooLongError: If video exceeds duration limit
         """
         # Validate URL and extract video ID
         is_valid, video_id = YouTubeURLValidator.validate_and_extract(url)
@@ -468,7 +591,7 @@ class YouTubeTranscriptFetcher:
         if not is_valid or not video_id:
             raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
             
-        return self.fetch_transcript(video_id, languages, include_metadata, check_unsupported)
+        return self.fetch_transcript(video_id, languages, include_metadata, check_unsupported, max_duration_seconds)
     
     def get_available_transcripts(self, video_id: str) -> List[Dict[str, Any]]:
         """
@@ -547,12 +670,13 @@ class YouTubeTranscriptFetcher:
             
         return self.get_video_metadata(video_id)
     
-    def check_video_support(self, video_id: str) -> Dict[str, Any]:
+    def check_video_support(self, video_id: str, max_duration_seconds: int = 1800) -> Dict[str, Any]:
         """
         Check if a video is supported for transcript extraction.
         
         Args:
             video_id: YouTube video ID
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
             
         Returns:
             Dictionary containing video support status
@@ -560,14 +684,15 @@ class YouTubeTranscriptFetcher:
         Raises:
             YouTubeTranscriptError: If video cannot be analyzed
         """
-        return self.metadata_extractor.detect_unsupported_video_type(video_id)
+        return self.metadata_extractor.detect_unsupported_video_type(video_id, max_duration_seconds)
     
-    def check_video_support_from_url(self, url: str) -> Dict[str, Any]:
+    def check_video_support_from_url(self, url: str, max_duration_seconds: int = 1800) -> Dict[str, Any]:
         """
         Check if a video is supported for transcript extraction from URL.
         
         Args:
             url: YouTube URL
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
             
         Returns:
             Dictionary containing video support status
@@ -581,7 +706,7 @@ class YouTubeTranscriptFetcher:
         if not is_valid or not video_id:
             raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
             
-        return self.check_video_support(video_id)
+        return self.check_video_support(video_id, max_duration_seconds)
     
     def check_transcript_availability(self, video_id: str) -> Dict[str, Any]:
         """
@@ -618,6 +743,104 @@ class YouTubeTranscriptFetcher:
             raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
             
         return self.check_transcript_availability(video_id)
+    
+    def validate_video_duration(
+        self, 
+        video_id: str, 
+        max_duration_seconds: int = 1800
+    ) -> Dict[str, Any]:
+        """
+        Validate video duration against maximum limit.
+        
+        Args:
+            video_id: YouTube video ID
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+            
+        Returns:
+            Dictionary containing duration validation results
+            
+        Raises:
+            YouTubeTranscriptError: If video cannot be analyzed
+        """
+        return self.metadata_extractor.validate_video_duration(video_id, max_duration_seconds)
+    
+    def validate_video_duration_from_url(
+        self, 
+        url: str, 
+        max_duration_seconds: int = 1800
+    ) -> Dict[str, Any]:
+        """
+        Validate video duration from URL against maximum limit.
+        
+        Args:
+            url: YouTube URL
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+            
+        Returns:
+            Dictionary containing duration validation results
+            
+        Raises:
+            YouTubeTranscriptError: If URL is invalid or video cannot be analyzed
+        """
+        # Validate URL and extract video ID
+        is_valid, video_id = YouTubeURLValidator.validate_and_extract(url)
+        
+        if not is_valid or not video_id:
+            raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
+            
+        return self.validate_video_duration(video_id, max_duration_seconds)
+    
+    def check_duration_limit(
+        self, 
+        video_id: str, 
+        max_duration_seconds: int = 1800,
+        raise_on_exceeded: bool = True
+    ) -> bool:
+        """
+        Check if video duration is within limits.
+        
+        Args:
+            video_id: YouTube video ID
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+            raise_on_exceeded: Whether to raise exception if duration is exceeded
+            
+        Returns:
+            True if duration is within limits, False otherwise
+            
+        Raises:
+            VideoTooLongError: If video exceeds duration and raise_on_exceeded is True
+            YouTubeTranscriptError: If video cannot be analyzed
+        """
+        return self.metadata_extractor.check_duration_limit(video_id, max_duration_seconds, raise_on_exceeded)
+    
+    def check_duration_limit_from_url(
+        self, 
+        url: str, 
+        max_duration_seconds: int = 1800,
+        raise_on_exceeded: bool = True
+    ) -> bool:
+        """
+        Check if video duration is within limits from URL.
+        
+        Args:
+            url: YouTube URL
+            max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+            raise_on_exceeded: Whether to raise exception if duration is exceeded
+            
+        Returns:
+            True if duration is within limits, False otherwise
+            
+        Raises:
+            VideoTooLongError: If video exceeds duration and raise_on_exceeded is True
+            YouTubeTranscriptError: If URL is invalid or video cannot be analyzed
+        """
+        # Validate URL and extract video ID
+        is_valid, video_id = YouTubeURLValidator.validate_and_extract(url)
+        
+        if not is_valid or not video_id:
+            raise YouTubeTranscriptError(f"Invalid YouTube URL: {url}")
+            
+        return self.check_duration_limit(video_id, max_duration_seconds, raise_on_exceeded)
     
     def _calculate_duration(self, transcript_list: List[Dict[str, Any]]) -> float:
         """
@@ -674,7 +897,8 @@ def fetch_youtube_transcript(
     video_id: str, 
     languages: Optional[List[str]] = None,
     include_metadata: bool = True,
-    check_unsupported: bool = True
+    check_unsupported: bool = True,
+    max_duration_seconds: int = 1800
 ) -> Dict[str, Any]:
     """
     Convenience function to fetch YouTube transcript.
@@ -684,19 +908,21 @@ def fetch_youtube_transcript(
         languages: Preferred languages for transcript
         include_metadata: Whether to include video metadata
         check_unsupported: Whether to check for unsupported video types
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
         
     Returns:
         Dictionary containing transcript data and metadata
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.fetch_transcript(video_id, languages, include_metadata, check_unsupported)
+    return fetcher.fetch_transcript(video_id, languages, include_metadata, check_unsupported, max_duration_seconds)
 
 
 def fetch_youtube_transcript_from_url(
     url: str, 
     languages: Optional[List[str]] = None,
     include_metadata: bool = True,
-    check_unsupported: bool = True
+    check_unsupported: bool = True,
+    max_duration_seconds: int = 1800
 ) -> Dict[str, Any]:
     """
     Convenience function to fetch YouTube transcript from URL.
@@ -706,12 +932,13 @@ def fetch_youtube_transcript_from_url(
         languages: Preferred languages for transcript
         include_metadata: Whether to include video metadata
         check_unsupported: Whether to check for unsupported video types
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
         
     Returns:
         Dictionary containing transcript data and metadata
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.fetch_transcript_from_url(url, languages, include_metadata, check_unsupported)
+    return fetcher.fetch_transcript_from_url(url, languages, include_metadata, check_unsupported, max_duration_seconds)
 
 
 def get_available_youtube_transcripts(video_id: str) -> List[Dict[str, Any]]:
@@ -756,32 +983,34 @@ def get_youtube_video_metadata_from_url(url: str) -> Dict[str, Any]:
     return fetcher.get_video_metadata_from_url(url)
 
 
-def check_youtube_video_support(video_id: str) -> Dict[str, Any]:
+def check_youtube_video_support(video_id: str, max_duration_seconds: int = 1800) -> Dict[str, Any]:
     """
     Convenience function to check if a YouTube video is supported.
     
     Args:
         video_id: YouTube video ID
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
         
     Returns:
         Dictionary containing video support status
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.check_video_support(video_id)
+    return fetcher.check_video_support(video_id, max_duration_seconds)
 
 
-def check_youtube_video_support_from_url(url: str) -> Dict[str, Any]:
+def check_youtube_video_support_from_url(url: str, max_duration_seconds: int = 1800) -> Dict[str, Any]:
     """
     Convenience function to check if a YouTube video is supported from URL.
     
     Args:
         url: YouTube URL
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
         
     Returns:
         Dictionary containing video support status
     """
     fetcher = YouTubeTranscriptFetcher()
-    return fetcher.check_video_support_from_url(url)
+    return fetcher.check_video_support_from_url(url, max_duration_seconds)
 
 
 def check_youtube_transcript_availability(video_id: str) -> Dict[str, Any]:
@@ -810,3 +1039,73 @@ def check_youtube_transcript_availability_from_url(url: str) -> Dict[str, Any]:
     """
     fetcher = YouTubeTranscriptFetcher()
     return fetcher.check_transcript_availability_from_url(url)
+
+
+def validate_youtube_video_duration(video_id: str, max_duration_seconds: int = 1800) -> Dict[str, Any]:
+    """
+    Convenience function to validate YouTube video duration.
+    
+    Args:
+        video_id: YouTube video ID
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+        
+    Returns:
+        Dictionary containing duration validation results
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.validate_video_duration(video_id, max_duration_seconds)
+
+
+def validate_youtube_video_duration_from_url(url: str, max_duration_seconds: int = 1800) -> Dict[str, Any]:
+    """
+    Convenience function to validate YouTube video duration from URL.
+    
+    Args:
+        url: YouTube URL
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+        
+    Returns:
+        Dictionary containing duration validation results
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.validate_video_duration_from_url(url, max_duration_seconds)
+
+
+def check_youtube_duration_limit(
+    video_id: str, 
+    max_duration_seconds: int = 1800, 
+    raise_on_exceeded: bool = True
+) -> bool:
+    """
+    Convenience function to check YouTube video duration limit.
+    
+    Args:
+        video_id: YouTube video ID
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+        raise_on_exceeded: Whether to raise exception if duration is exceeded
+        
+    Returns:
+        True if duration is within limits, False otherwise
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.check_duration_limit(video_id, max_duration_seconds, raise_on_exceeded)
+
+
+def check_youtube_duration_limit_from_url(
+    url: str, 
+    max_duration_seconds: int = 1800, 
+    raise_on_exceeded: bool = True
+) -> bool:
+    """
+    Convenience function to check YouTube video duration limit from URL.
+    
+    Args:
+        url: YouTube URL
+        max_duration_seconds: Maximum allowed duration in seconds (default: 1800 = 30 minutes)
+        raise_on_exceeded: Whether to raise exception if duration is exceeded
+        
+    Returns:
+        True if duration is within limits, False otherwise
+    """
+    fetcher = YouTubeTranscriptFetcher()
+    return fetcher.check_duration_limit_from_url(url, max_duration_seconds, raise_on_exceeded)
