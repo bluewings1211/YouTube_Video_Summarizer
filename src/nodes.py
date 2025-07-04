@@ -47,9 +47,9 @@ except ImportError:
         SUCCESS = "success"
         FAILED = "failed"
 
-from .utils.youtube_api import YouTubeTranscriptFetcher, YouTubeTranscriptError
-from .utils.validators import YouTubeURLValidator
-from .utils.call_llm import create_llm_client, LLMError
+from src.utils.youtube_api import YouTubeTranscriptFetcher, YouTubeTranscriptError
+from src.utils.validators import YouTubeURLValidator
+from src.utils.call_llm import create_llm_client, LLMError
 
 # Configure logging
 logger = logging.getLogger(__name__)

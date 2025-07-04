@@ -22,15 +22,19 @@ try:
     from youtube_transcript_api._errors import (
         TranscriptsDisabled, 
         NoTranscriptFound, 
-        VideoUnavailable,
-        TooManyRequests
+        VideoUnavailable
     )
+    # TooManyRequests might not be available in all versions
+    try:
+        from youtube_transcript_api._errors import TooManyRequests
+    except ImportError:
+        TooManyRequests = Exception
 except ImportError:
     raise ImportError(
         "youtube-transcript-api is required. Install with: pip install youtube-transcript-api"
     )
 
-from .validators import YouTubeURLValidator
+from src.utils.validators import YouTubeURLValidator
 
 # Configure logging
 logger = logging.getLogger(__name__)

@@ -5,7 +5,7 @@ uvicorn>=0.24.0
 pydantic>=2.5.0
 
 # PocketFlow - Workflow Orchestration
-pocketflow>=0.1.0
+pocketflow>=0.0.2
 
 # YouTube Integration
 youtube-transcript-api>=0.6.0

@@ -766,6 +766,8 @@ async def handle_workflow_error(workflow_error: WorkflowError, request_id: str) 
 def convert_timestamp_to_seconds(timestamp_str: str) -> int:
     """Convert timestamp string (MM:SS or HH:MM:SS) to seconds."""
     try:
+        if not timestamp_str:
+            return 0
         parts = timestamp_str.split(':')
         if len(parts) == 2:
             # MM:SS format
