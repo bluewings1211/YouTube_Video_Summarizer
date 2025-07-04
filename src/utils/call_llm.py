@@ -50,22 +50,78 @@ class LLMConfig:
 
 class LLMError(Exception):
     """Base exception for LLM operations."""
-    pass
+    
+    def __init__(self, message: str, provider: str = "", error_code: Optional[str] = None, 
+                 retry_after: Optional[int] = None):
+        super().__init__(message)
+        self.message = message
+        self.provider = provider
+        self.error_code = error_code
+        self.retry_after = retry_after
+        self.timestamp = datetime.utcnow().isoformat()
 
 
-class LLMClientError(LLMError):
-    """Client-side LLM errors."""
-    pass
-
-
-class LLMServerError(LLMError):
-    """Server-side LLM errors."""
-    pass
+class LLMAuthenticationError(LLMError):
+    """Authentication errors (invalid API key, etc.)."""
+    
+    def __init__(self, provider: str = ""):
+        message = f"Authentication failed for {provider}. Check your API key."
+        super().__init__(message, provider, "AUTH_ERROR")
 
 
 class LLMRateLimitError(LLMError):
     """Rate limit exceeded errors."""
-    pass
+    
+    def __init__(self, provider: str = "", retry_after: int = 60):
+        message = f"Rate limit exceeded for {provider}. Retry after {retry_after} seconds."
+        super().__init__(message, provider, "RATE_LIMIT", retry_after)
+
+
+class LLMQuotaError(LLMError):
+    """Quota/usage limit exceeded errors."""
+    
+    def __init__(self, provider: str = ""):
+        message = f"Usage quota exceeded for {provider}. Check your billing and limits."
+        super().__init__(message, provider, "QUOTA_EXCEEDED")
+
+
+class LLMModelError(LLMError):
+    """Model-specific errors (unavailable, deprecated, etc.)."""
+    
+    def __init__(self, model: str = "", provider: str = ""):
+        message = f"Model {model} is unavailable or invalid for {provider}"
+        super().__init__(message, provider, "MODEL_ERROR")
+
+
+class LLMContentError(LLMError):
+    """Content-related errors (filtered, too long, etc.)."""
+    
+    def __init__(self, reason: str = "Content filtered", provider: str = ""):
+        message = f"Content error: {reason}"
+        super().__init__(message, provider, "CONTENT_ERROR")
+
+
+class LLMTimeoutError(LLMError):
+    """Timeout errors."""
+    
+    def __init__(self, timeout: int = 30, provider: str = ""):
+        message = f"Request to {provider} timed out after {timeout} seconds"
+        super().__init__(message, provider, "TIMEOUT", retry_after=10)
+
+
+class LLMServerError(LLMError):
+    """Server-side LLM errors."""
+    
+    def __init__(self, status_code: int = 500, provider: str = ""):
+        message = f"Server error from {provider} (HTTP {status_code})"
+        super().__init__(message, provider, "SERVER_ERROR", retry_after=30)
+
+
+class LLMClientError(LLMError):
+    """Client-side LLM errors (bad request, etc.)."""
+    
+    def __init__(self, message: str = "Invalid request", provider: str = ""):
+        super().__init__(f"Client error: {message}", provider, "CLIENT_ERROR")
 
 
 class LLMClient:

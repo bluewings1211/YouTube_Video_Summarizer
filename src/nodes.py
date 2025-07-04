@@ -77,24 +77,80 @@ class BaseProcessingNode(Node):
     
     def _handle_error(self, error: Exception, context: str, retry_count: int = 0) -> NodeError:
         """Handle and log errors with structured information."""
+        # Determine if error is recoverable based on error type
+        is_recoverable = self._is_error_recoverable(error) and retry_count < self.max_retries
+        
         error_info = NodeError(
             node_name=self.name,
             error_type=type(error).__name__,
             message=str(error),
             retry_count=retry_count,
-            is_recoverable=retry_count < self.max_retries
+            is_recoverable=is_recoverable
         )
         
         log_msg = f"{context}: {error_info.error_type} - {error_info.message}"
         if retry_count > 0:
             log_msg += f" (retry {retry_count}/{self.max_retries})"
         
-        if error_info.is_recoverable:
+        # Include error details for debugging
+        if hasattr(error, 'error_code'):
+            log_msg += f" [Code: {error.error_code}]"
+        
+        if is_recoverable:
             self.logger.warning(log_msg)
         else:
-            self.logger.error(log_msg)
+            self.logger.error(log_msg, exc_info=True)
         
         return error_info
+    
+    def _is_error_recoverable(self, error: Exception) -> bool:
+        """Determine if an error is recoverable and worth retrying."""
+        # Import here to avoid circular imports
+        from .utils.youtube_api import (
+            PrivateVideoError, LiveVideoError, NoTranscriptAvailableError, 
+            VideoTooLongError, NetworkTimeoutError, RateLimitError
+        )
+        from .utils.call_llm import (
+            LLMRateLimitError, LLMTimeoutError, LLMServerError, 
+            LLMAuthenticationError, LLMQuotaError
+        )
+        
+        # Non-recoverable errors
+        non_recoverable_errors = (
+            PrivateVideoError,
+            LiveVideoError, 
+            NoTranscriptAvailableError,
+            VideoTooLongError,
+            LLMAuthenticationError,
+            LLMQuotaError,
+            ValueError,  # Usually validation errors
+            TypeError,   # Usually programming errors
+        )
+        
+        if isinstance(error, non_recoverable_errors):
+            return False
+        
+        # Recoverable errors (worth retrying)
+        recoverable_errors = (
+            NetworkTimeoutError,
+            RateLimitError,
+            LLMRateLimitError,
+            LLMTimeoutError,
+            LLMServerError,
+            ConnectionError,
+            TimeoutError,
+        )
+        
+        if isinstance(error, recoverable_errors):
+            return True
+        
+        # For generic exceptions, check the error message
+        error_message = str(error).lower()
+        if any(keyword in error_message for keyword in ['timeout', 'connection', 'network', 'rate limit']):
+            return True
+        
+        # Default to non-recoverable for unknown errors
+        return False
     
     def _retry_with_delay(self, retry_count: int) -> None:
         """Sleep with exponential backoff for retries."""
@@ -120,6 +176,55 @@ class BaseProcessingNode(Node):
         except Exception as e:
             self.logger.error(f"Failed to update store: {str(e)}")
             raise
+    
+    def _execute_with_retry(self, operation, *args, **kwargs):
+        """Execute an operation with retry logic and proper error handling."""
+        last_error = None
+        
+        for attempt in range(self.max_retries + 1):
+            try:
+                self.logger.debug(f"Executing operation (attempt {attempt + 1}/{self.max_retries + 1})")
+                return operation(*args, **kwargs)
+                
+            except Exception as e:
+                last_error = e
+                error_info = self._handle_error(e, f"Operation failed", attempt)
+                
+                # If not recoverable or max retries reached, raise the error
+                if not error_info.is_recoverable or attempt >= self.max_retries:
+                    self.logger.error(f"Operation failed permanently after {attempt + 1} attempts")
+                    raise e
+                
+                # Wait before retrying
+                self._retry_with_delay(attempt + 1)
+        
+        # This should never be reached, but just in case
+        if last_error:
+            raise last_error
+        else:
+            raise RuntimeError("Operation failed without specific error")
+    
+    def _validate_inputs(self, required_keys: List[str], store: Store) -> None:
+        """Validate required inputs are present in store."""
+        is_valid, missing_keys = self._validate_store_data(store, required_keys)
+        if not is_valid:
+            raise ValueError(f"Missing required inputs: {missing_keys}")
+    
+    def _handle_node_exception(self, phase: str, error: Exception) -> Dict[str, Any]:
+        """Handle exceptions that occur during node execution phases."""
+        error_info = self._handle_error(error, f"{phase} phase failed", 0)
+        
+        return {
+            'status': 'failed',
+            'error': {
+                'type': error_info.error_type,
+                'message': error_info.message,
+                'node': self.name,
+                'phase': phase,
+                'timestamp': error_info.timestamp,
+                'is_recoverable': error_info.is_recoverable
+            }
+        }
 
 
 class YouTubeTranscriptNode(BaseProcessingNode):
@@ -147,25 +252,34 @@ class YouTubeTranscriptNode(BaseProcessingNode):
         self.logger.info("Starting transcript preparation")
         
         try:
-            # Validate required input
-            is_valid, missing_keys = self._validate_store_data(store, ['youtube_url'])
-            if not is_valid:
-                raise ValueError(f"Missing required data: {missing_keys}")
+            # Validate required inputs using enhanced validation
+            self._validate_inputs(['youtube_url'], store)
             
             youtube_url = store['youtube_url']
+            self.logger.debug(f"Processing URL: {youtube_url}")
             
-            # Validate YouTube URL format
-            url_validator = YouTubeURLValidator()
-            is_valid_url, video_id = url_validator.validate_and_extract(youtube_url)
+            # Validate YouTube URL format with enhanced validation
+            def validate_url():
+                url_validator = YouTubeURLValidator()
+                is_valid_url, video_id = url_validator.validate_and_extract(youtube_url)
+                if not is_valid_url or not video_id:
+                    raise ValueError(f"Invalid YouTube URL: {youtube_url}")
+                return video_id
             
-            if not is_valid_url or not video_id:
-                raise ValueError(f"Invalid YouTube URL: {youtube_url}")
+            # Execute URL validation with retry logic
+            video_id = self._execute_with_retry(validate_url)
             
-            # Check video support status
-            support_status = self.transcript_fetcher.check_video_support(video_id)
+            # Check video support status with retry logic
+            def check_support():
+                return self.transcript_fetcher.check_video_support(video_id)
             
-            # Check transcript availability
-            transcript_availability = self.transcript_fetcher.check_transcript_availability(video_id)
+            support_status = self._execute_with_retry(check_support)
+            
+            # Check transcript availability with retry logic
+            def check_transcripts():
+                return self.transcript_fetcher.check_transcript_availability(video_id)
+            
+            transcript_availability = self._execute_with_retry(check_transcripts)
             
             prep_result = {
                 'video_id': video_id,
@@ -189,12 +303,7 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             return prep_result
             
         except Exception as e:
-            error_info = self._handle_error(e, "Transcript preparation failed")
-            return {
-                'prep_status': 'failed',
-                'error': error_info.__dict__,
-                'prep_timestamp': datetime.utcnow().isoformat()
-            }
+            return self._handle_node_exception("prep", e)
     
     def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """

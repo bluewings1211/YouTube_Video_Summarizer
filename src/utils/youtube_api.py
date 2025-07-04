@@ -13,6 +13,8 @@ import re
 import json
 import urllib.request
 import urllib.parse
+import time
+from contextlib import contextmanager
 
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -36,7 +38,13 @@ logger = logging.getLogger(__name__)
 
 class YouTubeTranscriptError(Exception):
     """Base exception for YouTube transcript operations."""
-    pass
+    
+    def __init__(self, message: str, video_id: str = "", error_code: Optional[str] = None):
+        super().__init__(message)
+        self.message = message
+        self.video_id = video_id
+        self.error_code = error_code
+        self.timestamp = datetime.utcnow().isoformat()
 
 
 class UnsupportedVideoTypeError(YouTubeTranscriptError):
@@ -46,22 +54,113 @@ class UnsupportedVideoTypeError(YouTubeTranscriptError):
 
 class PrivateVideoError(UnsupportedVideoTypeError):
     """Raised when video is private."""
-    pass
+    
+    def __init__(self, video_id: str = ""):
+        message = f"Video {video_id} is private and cannot be accessed"
+        super().__init__(message, video_id, "PRIVATE_VIDEO")
 
 
 class LiveVideoError(UnsupportedVideoTypeError):
     """Raised when video is live content."""
-    pass
+    
+    def __init__(self, video_id: str = ""):
+        message = f"Video {video_id} is a live stream or premiere and cannot be processed"
+        super().__init__(message, video_id, "LIVE_VIDEO")
 
 
 class NoTranscriptAvailableError(UnsupportedVideoTypeError):
     """Raised when no transcripts are available for the video."""
-    pass
+    
+    def __init__(self, video_id: str = "", available_languages: List[str] = None):
+        available_langs = ", ".join(available_languages) if available_languages else "none"
+        message = f"No transcript available for video {video_id}. Available languages: {available_langs}"
+        super().__init__(message, video_id, "NO_TRANSCRIPT")
+        self.available_languages = available_languages or []
 
 
 class VideoTooLongError(UnsupportedVideoTypeError):
     """Raised when video duration exceeds the maximum allowed limit."""
-    pass
+    
+    def __init__(self, video_id: str = "", duration: int = 0, max_duration: int = 1800):
+        message = f"Video {video_id} duration ({duration}s) exceeds maximum limit ({max_duration}s)"
+        super().__init__(message, video_id, "VIDEO_TOO_LONG")
+        self.duration = duration
+        self.max_duration = max_duration
+
+
+class VideoNotFoundError(YouTubeTranscriptError):
+    """Raised when video cannot be found."""
+    
+    def __init__(self, video_id: str = ""):
+        message = f"Video {video_id} not found or unavailable"
+        super().__init__(message, video_id, "VIDEO_NOT_FOUND")
+
+
+class NetworkTimeoutError(YouTubeTranscriptError):
+    """Raised when network operations timeout."""
+    
+    def __init__(self, operation: str = "YouTube API request", timeout: int = 30):
+        message = f"{operation} timed out after {timeout} seconds"
+        super().__init__(message, "", "NETWORK_TIMEOUT")
+        self.operation = operation
+        self.timeout = timeout
+
+
+class RateLimitError(YouTubeTranscriptError):
+    """Raised when rate limits are exceeded."""
+    
+    def __init__(self, retry_after: int = 60):
+        message = f"Rate limit exceeded. Please try again after {retry_after} seconds"
+        super().__init__(message, "", "RATE_LIMIT")
+        self.retry_after = retry_after
+
+
+@contextmanager
+def timeout_handler(operation: str, timeout_seconds: int = 30):
+    """Context manager for handling timeouts in network operations."""
+    import signal
+    
+    def timeout_handler_func(signum, frame):
+        raise NetworkTimeoutError(operation, timeout_seconds)
+    
+    # Set the signal handler
+    old_handler = signal.signal(signal.SIGALRM, timeout_handler_func)
+    signal.alarm(timeout_seconds)
+    
+    try:
+        yield
+    finally:
+        # Restore the old signal handler
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def handle_youtube_api_exceptions(func):
+    """Decorator to handle common YouTube API exceptions."""
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except TranscriptsDisabled as e:
+            video_id = getattr(args[0], 'video_id', '') if args else ''
+            raise NoTranscriptAvailableError(video_id) from e
+        except NoTranscriptFound as e:
+            video_id = getattr(args[0], 'video_id', '') if args else ''
+            raise NoTranscriptAvailableError(video_id) from e
+        except VideoUnavailable as e:
+            video_id = getattr(args[0], 'video_id', '') if args else ''
+            if 'private' in str(e).lower():
+                raise PrivateVideoError(video_id) from e
+            elif 'live' in str(e).lower() or 'premiere' in str(e).lower():
+                raise LiveVideoError(video_id) from e
+            else:
+                raise VideoNotFoundError(video_id) from e
+        except TooManyRequests as e:
+            raise RateLimitError() from e
+        except Exception as e:
+            logger.error(f"Unexpected YouTube API error: {str(e)}", exc_info=True)
+            video_id = getattr(args[0], 'video_id', '') if args else ''
+            raise YouTubeTranscriptError(f"Unexpected error: {str(e)}", video_id) from e
+    return wrapper
 
 
 class YouTubeVideoMetadataExtractor:
