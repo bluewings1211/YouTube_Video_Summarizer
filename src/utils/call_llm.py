@@ -27,6 +27,12 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
+try:
+    import ollama
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,7 @@ class LLMProvider(Enum):
     """Supported LLM providers."""
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    OLLAMA = "ollama"
 
 
 @dataclass
@@ -46,6 +53,9 @@ class LLMConfig:
     max_tokens: int = 1000
     temperature: float = 0.7
     timeout: int = 30
+    # Ollama-specific settings
+    ollama_host: str = "http://localhost:11434"
+    ollama_keep_alive: str = "5m"
 
 
 class LLMError(Exception):
@@ -124,6 +134,30 @@ class LLMClientError(LLMError):
         super().__init__(f"Client error: {message}", provider, "CLIENT_ERROR")
 
 
+class OllamaConnectionError(LLMError):
+    """Ollama server connection errors."""
+    
+    def __init__(self, host: str = "localhost:11434"):
+        message = f"Failed to connect to Ollama server at {host}. Ensure Ollama is running."
+        super().__init__(message, "ollama", "CONNECTION_ERROR")
+
+
+class OllamaModelNotFoundError(LLMError):
+    """Ollama model not found errors."""
+    
+    def __init__(self, model: str = ""):
+        message = f"Model '{model}' not found in Ollama. Run 'ollama pull {model}' to download it."
+        super().__init__(message, "ollama", "MODEL_NOT_FOUND")
+
+
+class OllamaInsufficientResourcesError(LLMError):
+    """Ollama insufficient resources errors."""
+    
+    def __init__(self, model: str = ""):
+        message = f"Insufficient resources to run model '{model}'. Consider using a smaller model."
+        super().__init__(message, "ollama", "INSUFFICIENT_RESOURCES")
+
+
 class LLMClient:
     """
     Unified LLM client for calling different AI providers.
@@ -140,6 +174,8 @@ class LLMClient:
             self._init_openai_client()
         elif config.provider == LLMProvider.ANTHROPIC:
             self._init_anthropic_client()
+        elif config.provider == LLMProvider.OLLAMA:
+            self._init_ollama_client()
         else:
             raise LLMClientError(f"Unsupported provider: {config.provider}")
     
@@ -166,6 +202,40 @@ class LLMClient:
         
         self.client = Anthropic(api_key=api_key)
         self.logger.info(f"Anthropic client initialized with model: {self.config.model}")
+    
+    def _init_ollama_client(self):
+        """Initialize Ollama client."""
+        if not OLLAMA_AVAILABLE:
+            raise LLMClientError("Ollama library not installed. Install with: pip install ollama")
+        
+        # Set up Ollama client with host configuration
+        self.client = ollama.Client(host=self.config.ollama_host)
+        
+        # Test connection and verify model availability
+        try:
+            # Check if Ollama server is running
+            models = self.client.list()
+            available_models = [model['name'] for model in models.get('models', [])]
+            
+            # Check if the requested model is available
+            if self.config.model not in available_models:
+                # Try to find partial matches (e.g., llama3.1:8b matches llama3.1)
+                model_found = any(self.config.model in model for model in available_models)
+                if not model_found:
+                    self.logger.warning(
+                        f"Model '{self.config.model}' not found. Available models: {available_models}"
+                    )
+                    raise OllamaModelNotFoundError(self.config.model)
+            
+            self.logger.info(f"Ollama client initialized with model: {self.config.model} at {self.config.ollama_host}")
+            
+        except Exception as e:
+            if "connection" in str(e).lower() or "refused" in str(e).lower():
+                raise OllamaConnectionError(self.config.ollama_host)
+            elif "not found" in str(e).lower():
+                raise OllamaModelNotFoundError(self.config.model)
+            else:
+                raise LLMClientError(f"Failed to initialize Ollama client: {str(e)}")
     
     def generate_text(
         self,
@@ -200,6 +270,8 @@ class LLMClient:
                 result = self._generate_openai(prompt, system_prompt, max_tokens, temperature)
             elif self.config.provider == LLMProvider.ANTHROPIC:
                 result = self._generate_anthropic(prompt, system_prompt, max_tokens, temperature)
+            elif self.config.provider == LLMProvider.OLLAMA:
+                result = self._generate_ollama(prompt, system_prompt, max_tokens, temperature)
             else:
                 raise LLMClientError(f"Unsupported provider: {self.config.provider}")
             
@@ -219,15 +291,24 @@ class LLMClient:
         except Exception as e:
             self.logger.error(f"Text generation failed: {str(e)}")
             
-            # Categorize error
-            if "rate limit" in str(e).lower():
-                raise LLMRateLimitError(f"Rate limit exceeded: {str(e)}")
-            elif "authentication" in str(e).lower() or "api key" in str(e).lower():
-                raise LLMClientError(f"Authentication error: {str(e)}")
-            elif "timeout" in str(e).lower():
-                raise LLMServerError(f"Request timeout: {str(e)}")
+            # Categorize error for better fallback handling
+            error_str = str(e).lower()
+            if "rate limit" in error_str:
+                raise LLMRateLimitError(self.config.provider.value, retry_after=60)
+            elif "authentication" in error_str or "api key" in error_str:
+                raise LLMAuthenticationError(self.config.provider.value)
+            elif "timeout" in error_str:
+                raise LLMTimeoutError(self.config.timeout, self.config.provider.value)
+            elif "quota" in error_str or "usage" in error_str:
+                raise LLMQuotaError(self.config.provider.value)
+            elif "model" in error_str and ("not found" in error_str or "unavailable" in error_str):
+                raise LLMModelError(self.config.model, self.config.provider.value)
+            elif "content" in error_str and ("filtered" in error_str or "policy" in error_str):
+                raise LLMContentError("Content filtered by provider", self.config.provider.value)
+            elif "server" in error_str or "500" in error_str or "502" in error_str or "503" in error_str:
+                raise LLMServerError(500, self.config.provider.value)
             else:
-                raise LLMError(f"LLM generation failed: {str(e)}")
+                raise LLMError(f"LLM generation failed: {str(e)}", self.config.provider.value)
     
     def _generate_openai(
         self,
@@ -290,8 +371,8 @@ class LLMClient:
             return {
                 'text': response.content[0].text,
                 'usage': {
-                    'input_tokens': response.usage.input_tokens,
-                    'output_tokens': response.usage.output_tokens,
+                    'prompt_tokens': response.usage.input_tokens,
+                    'completion_tokens': response.usage.output_tokens,
                     'total_tokens': response.usage.input_tokens + response.usage.output_tokens
                 }
             }
@@ -299,6 +380,82 @@ class LLMClient:
         except Exception as e:
             self.logger.error(f"Anthropic API call failed: {str(e)}")
             raise
+    
+    def _generate_ollama(
+        self,
+        prompt: str,
+        system_prompt: Optional[str],
+        max_tokens: int,
+        temperature: float
+    ) -> Dict[str, Any]:
+        """Generate text using Ollama API."""
+        try:
+            # Build the message structure for Ollama
+            messages = []
+            
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            
+            messages.append({"role": "user", "content": prompt})
+            
+            # Prepare options for Ollama
+            options = {
+                "temperature": temperature,
+                "num_predict": max_tokens,  # Ollama uses num_predict instead of max_tokens
+            }
+            
+            # Make the API call to Ollama
+            response = self.client.chat(
+                model=self.config.model,
+                messages=messages,
+                options=options,
+                keep_alive=self.config.ollama_keep_alive
+            )
+            
+            # Extract the response text
+            response_text = response.get('message', {}).get('content', '')
+            
+            if not response_text:
+                raise ValueError("Empty response from Ollama")
+            
+            # Estimate token usage (Ollama doesn't provide exact counts)
+            prompt_tokens = len(' '.join([msg['content'] for msg in messages]).split()) * 1.3  # Rough estimation
+            completion_tokens = len(response_text.split()) * 1.3
+            
+            return {
+                'text': response_text,
+                'usage': {
+                    'prompt_tokens': int(prompt_tokens),
+                    'completion_tokens': int(completion_tokens),
+                    'total_tokens': int(prompt_tokens + completion_tokens)
+                },
+                # Additional Ollama-specific metadata (for debugging/optimization)
+                '_ollama_metadata': {
+                    'model': response.get('model', self.config.model),
+                    'created_at': response.get('created_at', ''),
+                    'done': response.get('done', True),
+                    'total_duration': response.get('total_duration', 0),
+                    'load_duration': response.get('load_duration', 0),
+                    'prompt_eval_count': response.get('prompt_eval_count', 0),
+                    'prompt_eval_duration': response.get('prompt_eval_duration', 0),
+                    'eval_count': response.get('eval_count', 0),
+                    'eval_duration': response.get('eval_duration', 0)
+                }
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Ollama API call failed: {str(e)}")
+            
+            # Handle specific Ollama errors
+            error_str = str(e).lower()
+            if "connection" in error_str or "refused" in error_str:
+                raise OllamaConnectionError(self.config.ollama_host)
+            elif "not found" in error_str or "no such file" in error_str:
+                raise OllamaModelNotFoundError(self.config.model)
+            elif "out of memory" in error_str or "insufficient" in error_str:
+                raise OllamaInsufficientResourcesError(self.config.model)
+            else:
+                raise LLMError(f"Ollama generation failed: {str(e)}")
     
     def summarize_text(
         self,
@@ -540,17 +697,21 @@ def create_llm_client(
     model: str = "gpt-3.5-turbo",
     api_key: Optional[str] = None,
     max_tokens: int = 1000,
-    temperature: float = 0.7
+    temperature: float = 0.7,
+    ollama_host: str = "http://localhost:11434",
+    ollama_keep_alive: str = "5m"
 ) -> LLMClient:
     """
     Create an LLM client with the specified configuration.
     
     Args:
-        provider: LLM provider ("openai" or "anthropic")
+        provider: LLM provider ("openai", "anthropic", or "ollama")
         model: Model name to use
         api_key: API key (optional, can use environment variable)
         max_tokens: Maximum tokens for generation
         temperature: Temperature for generation
+        ollama_host: Ollama server host (for ollama provider)
+        ollama_keep_alive: How long to keep model loaded (for ollama provider)
         
     Returns:
         Configured LLMClient instance
@@ -562,7 +723,9 @@ def create_llm_client(
         model=model,
         api_key=api_key,
         max_tokens=max_tokens,
-        temperature=temperature
+        temperature=temperature,
+        ollama_host=ollama_host,
+        ollama_keep_alive=ollama_keep_alive
     )
     
     return LLMClient(config)
@@ -581,6 +744,14 @@ def get_default_models() -> Dict[str, List[str]]:
             'claude-3-opus-20240229',
             'claude-3-sonnet-20240229',
             'claude-3-haiku-20240307'
+        ],
+        'ollama': [
+            'llama3.1:8b',
+            'llama3.2:3b', 
+            'mistral:7b',
+            'qwen2.5:7b',
+            'mistral-small:24b',
+            'llama3.3:70b'
         ]
     }
 
@@ -591,5 +762,86 @@ def detect_provider_from_model(model: str) -> str:
         return 'openai'
     elif model.startswith('claude-'):
         return 'anthropic'
+    elif any(model.startswith(prefix) for prefix in ['llama', 'mistral', 'qwen', 'phi', 'gemma']):
+        return 'ollama'
     else:
         return 'openai'  # Default to OpenAI
+
+
+def check_ollama_availability(host: str = "http://localhost:11434") -> Dict[str, Any]:
+    """
+    Check if Ollama server is available and return status information.
+    
+    Args:
+        host: Ollama server host URL
+        
+    Returns:
+        Dictionary containing availability status and model information
+    """
+    if not OLLAMA_AVAILABLE:
+        return {
+            'available': False,
+            'reason': 'Ollama library not installed',
+            'models': [],
+            'host': host
+        }
+    
+    try:
+        client = ollama.Client(host=host)
+        models_response = client.list()
+        available_models = [model['name'] for model in models_response.get('models', [])]
+        
+        return {
+            'available': True,
+            'models': available_models,
+            'model_count': len(available_models),
+            'host': host,
+            'status': 'connected'
+        }
+        
+    except Exception as e:
+        error_str = str(e).lower()
+        if "connection" in error_str or "refused" in error_str:
+            reason = f"Cannot connect to Ollama server at {host}"
+        else:
+            reason = f"Ollama error: {str(e)}"
+            
+        return {
+            'available': False,
+            'reason': reason,
+            'models': [],
+            'host': host,
+            'error': str(e)
+        }
+
+
+def get_recommended_ollama_model(task: str = "summarization", resource_level: str = "medium") -> str:
+    """
+    Get recommended Ollama model based on task and resource constraints.
+    
+    Args:
+        task: Type of task ("summarization", "general", "multilingual")
+        resource_level: Resource level ("low", "medium", "high")
+        
+    Returns:
+        Recommended model name
+    """
+    recommendations = {
+        "summarization": {
+            "low": "llama3.2:3b",
+            "medium": "llama3.1:8b", 
+            "high": "mistral-small:24b"
+        },
+        "multilingual": {
+            "low": "qwen2.5:7b",
+            "medium": "qwen2.5:7b",
+            "high": "llama3.3:70b"
+        },
+        "general": {
+            "low": "llama3.2:3b",
+            "medium": "mistral:7b",
+            "high": "llama3.1:8b"
+        }
+    }
+    
+    return recommendations.get(task, recommendations["general"]).get(resource_level, "llama3.1:8b")

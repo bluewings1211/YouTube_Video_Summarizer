@@ -567,3 +567,198 @@ def get_preferred_transcript_languages(video_metadata: Dict[str, Any], transcrip
     detector = YouTubeLanguageDetector()
     result = detector.detect_language_comprehensive(video_metadata, transcript_text)
     return detector.get_preferred_transcript_languages(result)
+
+
+def detect_language(text: str) -> str:
+    """
+    Simple language detection for text content.
+    
+    Args:
+        text: Text content to analyze
+        
+    Returns:
+        Language code ('en', 'zh', 'zh-CN', 'zh-TW', etc.)
+    """
+    if not text or not text.strip():
+        return 'en'  # Default to English for empty text
+    
+    detector = YouTubeLanguageDetector()
+    
+    # Use the text content analysis directly
+    scores = detector._analyze_text_content(text)
+    best_language = max(scores.items(), key=lambda x: x[1])
+    
+    if best_language[1] > 0.3:  # Minimum confidence threshold
+        detected_lang = best_language[0]
+        
+        # Convert to standard language codes
+        if detected_lang == LanguageCode.ENGLISH:
+            return 'en'
+        elif detected_lang == LanguageCode.CHINESE_SIMPLIFIED:
+            return 'zh-CN'
+        elif detected_lang == LanguageCode.CHINESE_TRADITIONAL:
+            return 'zh-TW'
+        elif detected_lang == LanguageCode.CHINESE_GENERIC:
+            return 'zh'
+        elif detected_lang == LanguageCode.JAPANESE:
+            return 'ja'
+        elif detected_lang == LanguageCode.KOREAN:
+            return 'ko'
+    
+    return 'en'  # Default fallback
+
+
+def ensure_chinese_encoding(text: str) -> str:
+    """
+    Ensure proper encoding for Chinese text content.
+    
+    Args:
+        text: Input text that may contain Chinese characters
+        
+    Returns:
+        Properly encoded text string
+    """
+    if not text:
+        return text
+    
+    try:
+        # Ensure the text is properly encoded as UTF-8
+        if isinstance(text, bytes):
+            # If it's bytes, decode as UTF-8
+            text = text.decode('utf-8', errors='replace')
+        
+        # Normalize Unicode characters (helpful for Chinese text)
+        import unicodedata
+        normalized_text = unicodedata.normalize('NFC', text)
+        
+        # Ensure we can encode back to UTF-8 (validates the text)
+        normalized_text.encode('utf-8')
+        
+        return normalized_text
+        
+    except (UnicodeDecodeError, UnicodeEncodeError) as e:
+        logger.warning(f"Encoding issue with Chinese text: {str(e)}")
+        # Fallback: try to clean up the text
+        try:
+            # Replace problematic characters and return
+            return text.encode('utf-8', errors='replace').decode('utf-8')
+        except:
+            # Last resort: return original text
+            return text
+
+
+def is_chinese_text(text: str) -> bool:
+    """
+    Check if text contains Chinese characters.
+    
+    Args:
+        text: Text to check
+        
+    Returns:
+        True if text contains Chinese characters, False otherwise
+    """
+    if not text:
+        return False
+    
+    detector = YouTubeLanguageDetector()
+    chinese_count = detector._count_chinese_characters(text)
+    text_length = len(text)
+    
+    # Consider text Chinese if at least 10% of characters are Chinese
+    return chinese_count > 0 and (chinese_count / text_length) >= 0.1
+
+
+def get_chinese_optimized_prompts() -> Dict[str, str]:
+    """
+    Get optimized prompts for Chinese language content processing.
+    
+    Returns:
+        Dictionary of prompt templates optimized for Chinese content
+    """
+    return {
+        'summarization_system': """你是一个专业的中文内容总结专家。请根据以下指导原则创建一个专业的摘要：
+
+指导原则：
+- 专注于主要观点和关键见解
+- 保持原文的语调和重要背景
+- 使用清晰、简洁的语言
+- 在相关时包含具体细节
+- 确保摘要连贯且结构良好
+- 保持中文表达的自然性和流畅性""",
+
+        'keywords_system': """你是一个专业的中文关键词提取专家。请从提供的文本中提取最重要的关键词。
+
+指导原则：
+- 专注于最相关和重要的术语
+- 包括单个词汇和短语
+- 避免常见的停用词，除非它们是重要短语的一部分
+- 考虑文本的上下文和领域
+- 提供对搜索和分类有用的关键词
+- 优先选择具有实际意义的中文词汇""",
+
+        'timestamps_system': """你是一个专业的中文视频内容分析专家。请分析提供的转录文本，识别最重要的时间戳。
+
+指导原则：
+- 专注于关键见解、重要公告或转折点
+- 为每个时间戳提供简要描述
+- 按重要性评分（1-10分）
+- 选择观众希望直接跳转到的时刻
+- 确保描述准确反映该时间点的内容
+- 使用自然的中文表达"""
+    }
+
+
+def optimize_chinese_content_for_llm(text: str, task_type: str = "summarization") -> Dict[str, str]:
+    """
+    Optimize Chinese content for LLM processing.
+    
+    Args:
+        text: Chinese text content
+        task_type: Type of task ("summarization", "keywords", "timestamps")
+        
+    Returns:
+        Dictionary with optimized prompts and content
+    """
+    # Ensure proper encoding
+    optimized_text = ensure_chinese_encoding(text)
+    
+    # Get Chinese-optimized prompts
+    prompts = get_chinese_optimized_prompts()
+    
+    # Select appropriate system prompt
+    system_prompt_key = f"{task_type}_system"
+    system_prompt = prompts.get(system_prompt_key, prompts['summarization_system'])
+    
+    # Create task-specific user prompt
+    if task_type == "summarization":
+        user_prompt = f"""请总结以下中文文本内容：
+
+{optimized_text}
+
+请提供一个专业的摘要："""
+    
+    elif task_type == "keywords":
+        user_prompt = f"""请从以下中文文本中提取关键词：
+
+{optimized_text}
+
+请提供最重要的关键词，每行一个，不要编号或项目符号："""
+    
+    elif task_type == "timestamps":
+        user_prompt = f"""请分析以下中文转录文本并识别最重要的时间戳：
+
+{optimized_text}
+
+请提供格式如下的时间戳：
+[XXX.X]s (评分: X/10) - 描述"""
+    
+    else:
+        user_prompt = f"""请处理以下中文文本内容：
+
+{optimized_text}"""
+    
+    return {
+        'system_prompt': system_prompt,
+        'user_prompt': user_prompt,
+        'optimized_text': optimized_text
+    }

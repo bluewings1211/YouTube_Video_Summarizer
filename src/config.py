@@ -30,15 +30,29 @@ class AppConfig(BaseModel):
     anthropic_api_key: Optional[str] = config('ANTHROPIC_API_KEY', default=None)
     
     # LLM Configuration
-    default_llm_provider: str = config('DEFAULT_LLM_PROVIDER', default='openai')
+    default_llm_provider: str = config('DEFAULT_LLM_PROVIDER', default='ollama')
     openai_model: str = config('OPENAI_MODEL', default='gpt-4-turbo-preview')
     anthropic_model: str = config('ANTHROPIC_MODEL', default='claude-3-sonnet-20240229')
+    ollama_model: str = config('OLLAMA_MODEL', default='llama3.1:8b')
     max_tokens: int = config('MAX_TOKENS', default=4000, cast=int)
     temperature: float = config('TEMPERATURE', default=0.7, cast=float)
     llm_timeout: int = config('LLM_TIMEOUT', default=60, cast=int)
     llm_summarization_timeout: int = config('LLM_SUMMARIZATION_TIMEOUT', default=120, cast=int)
     llm_keyword_timeout: int = config('LLM_KEYWORD_TIMEOUT', default=45, cast=int)
     llm_timestamp_timeout: int = config('LLM_TIMESTAMP_TIMEOUT', default=90, cast=int)
+    
+    # Ollama Configuration
+    ollama_host: str = config('OLLAMA_HOST', default='http://localhost:11434')
+    ollama_keep_alive: str = config('OLLAMA_KEEP_ALIVE', default='5m')
+    ollama_fallback_enabled: bool = config('OLLAMA_FALLBACK_ENABLED', default=True, cast=bool)
+    ollama_fallback_provider: str = config('OLLAMA_FALLBACK_PROVIDER', default='openai')
+    ollama_connection_timeout: int = config('OLLAMA_CONNECTION_TIMEOUT', default=10, cast=int)
+    
+    # Model Selection Strategy
+    model_selection_strategy: str = config('MODEL_SELECTION_STRATEGY', default='auto')  # auto, prefer_local, prefer_cloud, cloud_only
+    chinese_language_model: str = config('CHINESE_LANGUAGE_MODEL', default='qwen2.5:7b')
+    performance_model: str = config('PERFORMANCE_MODEL', default='mistral:7b')
+    lightweight_model: str = config('LIGHTWEIGHT_MODEL', default='llama3.2:3b')
     
     # YouTube API
     youtube_api_timeout: int = config('YOUTUBE_API_TIMEOUT', default=30, cast=int)
@@ -115,9 +129,25 @@ class AppConfig(BaseModel):
     @validator('default_llm_provider')
     def validate_llm_provider(cls, v):
         """Validate LLM provider."""
-        valid_providers = ['openai', 'anthropic']
+        valid_providers = ['openai', 'anthropic', 'ollama']
         if v not in valid_providers:
             raise ValueError(f'LLM provider must be one of: {valid_providers}')
+        return v
+    
+    @validator('ollama_fallback_provider')
+    def validate_ollama_fallback_provider(cls, v):
+        """Validate Ollama fallback provider."""
+        valid_providers = ['openai', 'anthropic']
+        if v not in valid_providers:
+            raise ValueError(f'Ollama fallback provider must be one of: {valid_providers}')
+        return v
+    
+    @validator('model_selection_strategy')
+    def validate_model_selection_strategy(cls, v):
+        """Validate model selection strategy."""
+        valid_strategies = ['auto', 'prefer_local', 'prefer_cloud', 'cloud_only']
+        if v not in valid_strategies:
+            raise ValueError(f'Model selection strategy must be one of: {valid_strategies}')
         return v
     
     @validator('log_level')
@@ -249,6 +279,36 @@ class AppConfig(BaseModel):
             'max_delay': self.retry_max_delay,
             'backoff_multiplier': self.retry_backoff_multiplier,
             'jitter_enabled': self.retry_jitter_enabled
+        }
+    
+    @property
+    def ollama_config(self) -> Dict[str, Any]:
+        """Get complete Ollama configuration."""
+        return {
+            'host': self.ollama_host,
+            'model': self.ollama_model,
+            'keep_alive': self.ollama_keep_alive,
+            'fallback_enabled': self.ollama_fallback_enabled,
+            'fallback_provider': self.ollama_fallback_provider,
+            'connection_timeout': self.ollama_connection_timeout
+        }
+    
+    @property
+    def llm_config(self) -> Dict[str, Any]:
+        """Get complete LLM configuration."""
+        return {
+            'default_provider': self.default_llm_provider,
+            'openai_model': self.openai_model,
+            'anthropic_model': self.anthropic_model,
+            'ollama_model': self.ollama_model,
+            'max_tokens': self.max_tokens,
+            'temperature': self.temperature,
+            'timeout': self.llm_timeout,
+            'model_selection_strategy': self.model_selection_strategy,
+            'chinese_language_model': self.chinese_language_model,
+            'performance_model': self.performance_model,
+            'lightweight_model': self.lightweight_model,
+            'ollama': self.ollama_config
         }
     
     def get_logging_config(self) -> dict:

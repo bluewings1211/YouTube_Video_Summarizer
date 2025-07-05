@@ -50,6 +50,7 @@ except ImportError:
 from src.utils.youtube_api import YouTubeTranscriptFetcher, YouTubeTranscriptError
 from src.utils.validators import YouTubeURLValidator
 from src.utils.call_llm import create_llm_client, LLMError
+from src.utils.smart_llm_client import SmartLLMClient, TaskRequirements, detect_task_requirements
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -112,7 +113,8 @@ class BaseProcessingNode(Node):
         )
         from .utils.call_llm import (
             LLMRateLimitError, LLMTimeoutError, LLMServerError, 
-            LLMAuthenticationError, LLMQuotaError
+            LLMAuthenticationError, LLMQuotaError, OllamaConnectionError,
+            OllamaModelNotFoundError, OllamaInsufficientResourcesError
         )
         
         # Non-recoverable errors
@@ -123,6 +125,8 @@ class BaseProcessingNode(Node):
             VideoTooLongError,
             LLMAuthenticationError,
             LLMQuotaError,
+            OllamaModelNotFoundError,  # Model not found requires manual intervention
+            OllamaInsufficientResourcesError,  # Resource issues require system changes
             ValueError,  # Usually validation errors
             TypeError,   # Usually programming errors
         )
@@ -137,6 +141,7 @@ class BaseProcessingNode(Node):
             LLMRateLimitError,
             LLMTimeoutError,
             LLMServerError,
+            OllamaConnectionError,  # Connection issues may be temporary
             ConnectionError,
             TimeoutError,
         )
@@ -533,7 +538,7 @@ class SummarizationNode(BaseProcessingNode):
     
     def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
         super().__init__("SummarizationNode", max_retries, retry_delay)
-        self.llm_client = None
+        self.smart_llm_client = None
         self.target_word_count = 500
     
     def prep(self, store: Store) -> Dict[str, Any]:
@@ -565,21 +570,11 @@ class SummarizationNode(BaseProcessingNode):
             if word_count < 50:
                 raise ValueError(f"Transcript too short for summarization ({word_count} words)")
             
-            # Initialize LLM client
+            # Initialize Smart LLM client
             try:
-                # Try OpenAI first, fall back to environment detection
-                provider = os.getenv('LLM_PROVIDER', 'openai')
-                model = os.getenv('LLM_MODEL', 'gpt-3.5-turbo')
-                
-                self.llm_client = create_llm_client(
-                    provider=provider,
-                    model=model,
-                    max_tokens=800,  # Allow extra tokens for 500-word summary
-                    temperature=0.3  # Lower temperature for consistent summaries
-                )
-                
+                self.smart_llm_client = SmartLLMClient()
             except Exception as e:
-                raise ValueError(f"Failed to initialize LLM client: {str(e)}")
+                raise ValueError(f"Failed to initialize Smart LLM client: {str(e)}")
             
             prep_result = {
                 'transcript_text': transcript_text,
@@ -587,8 +582,6 @@ class SummarizationNode(BaseProcessingNode):
                 'target_word_count': self.target_word_count,
                 'video_id': transcript_data.get('video_id', 'unknown'),
                 'video_title': store.get('video_metadata', {}).get('title', 'Unknown'),
-                'llm_provider': provider,
-                'llm_model': model,
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
             }
@@ -633,16 +626,24 @@ class SummarizationNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Generate summary with context
-                summary_result = self.llm_client.summarize_text(
+                # Create task requirements for smart model selection
+                task_requirements = detect_task_requirements(
                     text=transcript_text,
-                    target_length=target_word_count,
-                    style="professional"
+                    task_type="summarization",
+                    quality_level="medium"
                 )
                 
-                # Validate summary quality
-                summary_text = summary_result['summary']
-                summary_word_count = summary_result['word_count']
+                # Generate summary with smart client and Chinese optimization
+                summary_result = self.smart_llm_client.generate_text_with_chinese_optimization(
+                    text=transcript_text,
+                    task_requirements=task_requirements,
+                    max_tokens=800,  # Allow extra tokens for 500-word summary
+                    temperature=0.3  # Lower temperature for consistent summaries
+                )
+                
+                # Extract and validate summary text
+                summary_text = summary_result['text']
+                summary_word_count = len(summary_text.split())
                 
                 if not summary_text or summary_word_count < 50:
                     raise ValueError(f"Generated summary too short ({summary_word_count} words)")
@@ -654,17 +655,20 @@ class SummarizationNode(BaseProcessingNode):
                     target_word_count
                 )
                 
+                # Calculate compression ratio
+                compression_ratio = prep_result['original_word_count'] / max(summary_word_count, 1)
+                
                 exec_result = {
                     'exec_status': 'success',
                     'summary_text': summary_text,
                     'summary_word_count': summary_word_count,
                     'target_word_count': target_word_count,
                     'original_word_count': prep_result['original_word_count'],
-                    'compression_ratio': summary_result['compression_ratio'],
+                    'compression_ratio': compression_ratio,
                     'summary_stats': summary_stats,
                     'video_id': prep_result['video_id'],
                     'video_title': video_title,
-                    'llm_metadata': summary_result['generation_metadata'],
+                    'llm_metadata': summary_result,
                     'exec_timestamp': datetime.utcnow().isoformat(),
                     'retry_count': retry_count
                 }
@@ -731,8 +735,8 @@ class SummarizationNode(BaseProcessingNode):
                         exec_result.get('exec_timestamp', '')
                     ),
                     'retry_count': exec_result.get('retry_count', 0),
-                    'llm_provider': prep_result.get('llm_provider', 'unknown'),
-                    'llm_model': prep_result.get('llm_model', 'unknown')
+                    'llm_provider': exec_result.get('llm_metadata', {}).get('provider', 'unknown'),
+                    'llm_model': exec_result.get('llm_metadata', {}).get('model', 'unknown')
                 }
             }
             
@@ -803,7 +807,7 @@ class TimestampNode(BaseProcessingNode):
     
     def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
         super().__init__("TimestampNode", max_retries, retry_delay)
-        self.llm_client = None
+        self.smart_llm_client = None
         self.default_timestamp_count = 5
     
     def prep(self, store: Store) -> Dict[str, Any]:
@@ -845,20 +849,11 @@ class TimestampNode(BaseProcessingNode):
             if video_duration <= 0:
                 self.logger.warning("Video duration not available, proceeding anyway")
             
-            # Initialize LLM client
+            # Initialize Smart LLM client
             try:
-                provider = os.getenv('LLM_PROVIDER', 'openai')
-                model = os.getenv('LLM_MODEL', 'gpt-3.5-turbo')
-                
-                self.llm_client = create_llm_client(
-                    provider=provider,
-                    model=model,
-                    max_tokens=600,  # Sufficient for timestamp descriptions
-                    temperature=0.4  # Balanced creativity for descriptions
-                )
-                
+                self.smart_llm_client = SmartLLMClient()
             except Exception as e:
-                raise ValueError(f"Failed to initialize LLM client: {str(e)}")
+                raise ValueError(f"Failed to initialize Smart LLM client: {str(e)}")
             
             # Filter and validate transcript entries
             valid_transcript = self._filter_transcript_entries(raw_transcript)
@@ -873,8 +868,6 @@ class TimestampNode(BaseProcessingNode):
                 'raw_transcript': valid_transcript,
                 'transcript_count': len(valid_transcript),
                 'timestamp_count': self.default_timestamp_count,
-                'llm_provider': provider,
-                'llm_model': model,
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
             }
@@ -920,11 +913,20 @@ class TimestampNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Generate timestamps using LLM
-                timestamps_result = self.llm_client.generate_timestamps(
-                    transcript_data=raw_transcript,
-                    video_id=video_id,
-                    count=timestamp_count
+                # Create task requirements for smart model selection
+                transcript_text = self._format_transcript_for_analysis(raw_transcript)
+                task_requirements = detect_task_requirements(
+                    text=transcript_text,
+                    task_type="timestamps",
+                    quality_level="medium"
+                )
+                
+                # Generate timestamps using smart client
+                timestamps_result = self._generate_timestamps_with_smart_client(
+                    raw_transcript,
+                    video_id,
+                    timestamp_count,
+                    task_requirements
                 )
                 
                 # Validate generated timestamps
@@ -1036,8 +1038,8 @@ class TimestampNode(BaseProcessingNode):
                         exec_result.get('exec_timestamp', '')
                     ),
                     'retry_count': exec_result.get('retry_count', 0),
-                    'llm_provider': prep_result.get('llm_provider', 'unknown'),
-                    'llm_model': prep_result.get('llm_model', 'unknown')
+                    'llm_provider': exec_result.get('llm_metadata', {}).get('provider', 'unknown'),
+                    'llm_model': exec_result.get('llm_metadata', {}).get('model', 'unknown')
                 }
             }
             
@@ -1138,6 +1140,68 @@ class TimestampNode(BaseProcessingNode):
         
         return enhanced
     
+    def _format_transcript_for_analysis(self, raw_transcript: List[Dict[str, Any]]) -> str:
+        """Format transcript data for text analysis."""
+        transcript_text = ""
+        for i, entry in enumerate(raw_transcript[:50]):  # Use first 50 entries
+            start_time = entry.get('start', 0)
+            text = entry.get('text', '')
+            transcript_text += f"[{start_time:.1f}s] {text}\n"
+        return transcript_text
+    
+    def _generate_timestamps_with_smart_client(
+        self, 
+        raw_transcript: List[Dict[str, Any]], 
+        video_id: str, 
+        count: int,
+        task_requirements: TaskRequirements
+    ) -> Dict[str, Any]:
+        """Generate timestamps using the smart LLM client."""
+        # Format transcript for processing
+        transcript_text = self._format_transcript_for_analysis(raw_transcript)
+        
+        # Create timestamp prompt
+        system_prompt = f"""You are an expert at identifying the most important moments in video content. Analyze the provided transcript and identify the {count} most significant timestamps.
+
+Guidelines:
+- Focus on key insights, important announcements, or turning points
+- Include a brief description of what happens at each timestamp
+- Rate the importance on a scale of 1-10
+- Provide timestamps in the format: [timestamp]s
+- Choose moments that viewers would want to jump to directly"""
+
+        user_prompt = f"""Analyze this transcript and identify the {count} most important timestamps:
+
+{transcript_text}
+
+For each timestamp, provide:
+1. The timestamp in seconds
+2. A brief description (10-20 words)
+3. Importance rating (1-10)
+
+Format each entry as:
+[XXX.X]s (Rating: X/10) - Description"""
+
+        # Generate with smart client
+        result = self.smart_llm_client.generate_text_with_chinese_optimization(
+            text=transcript_text,
+            task_requirements=task_requirements,
+            max_tokens=600,
+            temperature=0.4
+        )
+        
+        # Parse the timestamps from the response
+        timestamps_text = result['text']
+        timestamps = self._parse_timestamps(timestamps_text, video_id)
+        
+        return {
+            'timestamps': timestamps,
+            'count': len(timestamps),
+            'requested_count': count,
+            'video_id': video_id,
+            'generation_metadata': result
+        }
+    
     def _calculate_timestamp_stats(
         self, 
         timestamps: List[Dict[str, Any]], 
@@ -1185,7 +1249,7 @@ class KeywordExtractionNode(BaseProcessingNode):
     
     def __init__(self, max_retries: int = 3, retry_delay: float = 1.5):
         super().__init__("KeywordExtractionNode", max_retries, retry_delay)
-        self.llm_client = None
+        self.smart_llm_client = None
         self.default_keyword_count = 6  # Middle of 5-8 range
     
     def prep(self, store: Store) -> Dict[str, Any]:
@@ -1230,20 +1294,11 @@ class KeywordExtractionNode(BaseProcessingNode):
             video_id = transcript_data.get('video_id', 'unknown')
             video_title = video_metadata.get('title', 'Unknown')
             
-            # Initialize LLM client
+            # Initialize Smart LLM client
             try:
-                provider = os.getenv('LLM_PROVIDER', 'openai')
-                model = os.getenv('LLM_MODEL', 'gpt-3.5-turbo')
-                
-                self.llm_client = create_llm_client(
-                    provider=provider,
-                    model=model,
-                    max_tokens=300,  # Sufficient for keyword extraction
-                    temperature=0.2  # Low temperature for consistent results
-                )
-                
+                self.smart_llm_client = SmartLLMClient()
             except Exception as e:
-                raise ValueError(f"Failed to initialize LLM client: {str(e)}")
+                raise ValueError(f"Failed to initialize Smart LLM client: {str(e)}")
             
             prep_result = {
                 'video_id': video_id,
@@ -1253,8 +1308,6 @@ class KeywordExtractionNode(BaseProcessingNode):
                 'text_word_count': word_count,
                 'keyword_count': self.default_keyword_count,
                 'has_summary': bool(summary_text),
-                'llm_provider': provider,
-                'llm_model': model,
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
             }
@@ -1300,11 +1353,18 @@ class KeywordExtractionNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Extract keywords using LLM
-                keywords_result = self.llm_client.extract_keywords(
+                # Create task requirements for smart model selection
+                task_requirements = detect_task_requirements(
                     text=extraction_text,
-                    count=keyword_count,
-                    include_phrases=True
+                    task_type="keywords",
+                    quality_level="medium"
+                )
+                
+                # Generate keywords using smart client
+                keywords_result = self._generate_keywords_with_smart_client(
+                    extraction_text,
+                    keyword_count,
+                    task_requirements
                 )
                 
                 # Validate extracted keywords
@@ -1426,8 +1486,8 @@ class KeywordExtractionNode(BaseProcessingNode):
                         exec_result.get('exec_timestamp', '')
                     ),
                     'retry_count': exec_result.get('retry_count', 0),
-                    'llm_provider': prep_result.get('llm_provider', 'unknown'),
-                    'llm_model': prep_result.get('llm_model', 'unknown')
+                    'llm_provider': exec_result.get('llm_metadata', {}).get('provider', 'unknown'),
+                    'llm_model': exec_result.get('llm_metadata', {}).get('model', 'unknown')
                 }
             }
             
@@ -1457,6 +1517,52 @@ class KeywordExtractionNode(BaseProcessingNode):
                 'post_timestamp': datetime.utcnow().isoformat()
             }
     
+    def _generate_keywords_with_smart_client(
+        self,
+        text: str,
+        count: int,
+        task_requirements: TaskRequirements
+    ) -> Dict[str, Any]:
+        """Generate keywords using the smart LLM client."""
+        
+        # Create keyword extraction prompt
+        system_prompt = f"""You are an expert at extracting relevant keywords from text. Extract the {count} most important keywords and key phrases from the provided text.
+
+Guidelines:
+- Focus on the most relevant and significant terms
+- Include both single words and short phrases if relevant
+- Avoid common stop words unless they're part of important phrases
+- Consider the context and domain of the text
+- Provide keywords that would be useful for search and categorization"""
+
+        user_prompt = f"""Extract the {count} most important keywords from this text:
+
+{text}
+
+Please provide exactly {count} keywords, one per line, without numbering or bullets:"""
+
+        # Generate with smart client
+        result = self.smart_llm_client.generate_text_with_chinese_optimization(
+            text=text,
+            task_requirements=task_requirements,
+            max_tokens=300,
+            temperature=0.2
+        )
+        
+        # Parse keywords from response
+        keywords_text = result['text'].strip()
+        keywords = [kw.strip() for kw in keywords_text.split('\n') if kw.strip()]
+        
+        # Ensure we have the right number of keywords
+        keywords = keywords[:count]
+        
+        return {
+            'keywords': keywords,
+            'count': len(keywords),
+            'requested_count': count,
+            'generation_metadata': result
+        }
+
     def _enhance_keywords(
         self, 
         keywords: List[str], 
