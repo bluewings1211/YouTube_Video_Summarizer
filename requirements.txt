@@ -21,21 +21,41 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 aiohttp>=3.9.0
 
+# Proxy Support
+requests[socks]>=2.31.0
+pysocks>=1.7.1
+urllib3>=2.0.0
+
+# Security & Encryption
+cryptography>=41.0.0
+bcrypt>=4.0.0
+passlib>=1.7.4
+pyjwt>=2.8.0
+
+# Configuration Management
+python-decouple>=3.8
+pyyaml>=6.0.1
+toml>=0.10.2
+
+# Redis Support
+redis>=5.0.0
+hiredis>=2.2.0
+
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
 pytest-asyncio>=0.21.0
+pytest-mock>=3.12.0
 
 # Code Quality
 black>=23.0.0
 flake8>=6.1.0
 mypy>=1.7.0
-
-# Development
-python-decouple>=3.8
+pre-commit>=3.5.0
 
 # Logging
 python-json-logger>=2.0.7
+structlog>=23.2.0
 
 # Container Health Checks
 psutil>=5.9.0
@@ -44,3 +64,36 @@ psutil>=5.9.0
 locust>=2.17.0
 pytest-benchmark>=4.0.0
 memory-profiler>=0.61.0
+
+# Network Utilities
+dnspython>=2.4.0
+ipaddress>=1.0.23
+validators>=0.22.0
+
+# File Handling
+chardet>=5.2.0
+python-magic>=0.4.27
+
+# Date/Time Utilities
+python-dateutil>=2.8.2
+pytz>=2023.3
+
+# Development Tools
+watchdog>=3.0.0
+rich>=13.7.0
+click>=8.1.0
+
+# Optional Dependencies for Enhanced Features
+# SSL/TLS Support
+pyopenssl>=23.3.0
+certifi>=2023.11.17
+
+# Advanced Proxy Features
+stem>=1.8.2  # For Tor proxy support (optional)
+
+# Monitoring & Metrics
+prometheus-client>=0.19.0
+statsd>=4.0.1
+
+# Additional Security
+secrets>=0.3.0  # Part of Python standard library but listed for clarity
