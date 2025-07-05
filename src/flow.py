@@ -78,6 +78,13 @@ try:
         KeywordExtractionNode,
         NodeError
     )
+    from .utils.language_detector import (
+        YouTubeLanguageDetector, LanguageDetectionResult, LanguageCode,
+        detect_video_language, is_chinese_video, is_english_video,
+        get_preferred_transcript_languages, optimize_chinese_content_for_llm,
+        ensure_chinese_encoding, detect_mixed_language_content,
+        segment_mixed_language_content
+    )
 except ImportError:
     # For testing - try absolute import
     try:
@@ -87,6 +94,13 @@ except ImportError:
             TimestampNode,
             KeywordExtractionNode,
             NodeError
+        )
+        from utils.language_detector import (
+            YouTubeLanguageDetector, LanguageDetectionResult, LanguageCode,
+            detect_video_language, is_chinese_video, is_english_video,
+            get_preferred_transcript_languages, optimize_chinese_content_for_llm,
+            ensure_chinese_encoding, detect_mixed_language_content,
+            segment_mixed_language_content
         )
     except ImportError:
         # Create mock nodes for testing
@@ -104,6 +118,23 @@ except ImportError:
         
         class NodeError:
             pass
+        
+        # Mock language detection functions
+        class LanguageCode:
+            ENGLISH = "en"
+            CHINESE_SIMPLIFIED = "zh-CN"
+            CHINESE_GENERIC = "zh"
+        
+        def detect_video_language(metadata, transcript=None):
+            return type('MockResult', (), {'detected_language': LanguageCode.ENGLISH, 'confidence_score': 0.9})()
+        
+        def is_chinese_video(metadata, transcript=None): return False
+        def is_english_video(metadata, transcript=None): return True
+        def get_preferred_transcript_languages(metadata, transcript=None): return ['en']
+        def optimize_chinese_content_for_llm(text, task_type="summarization"): return {'optimized_text': text}
+        def ensure_chinese_encoding(text): return text
+        def detect_mixed_language_content(text, chunk_size=500): return {'is_mixed': False, 'primary_language': 'en'}
+        def segment_mixed_language_content(text, target_languages=None): return {'is_segmented': False, 'segments': [{'language': 'en', 'content': text}]}
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -214,6 +245,20 @@ class ErrorSeverity(Enum):
 
 
 @dataclass
+class LanguageProcessingConfig:
+    """Configuration for language-specific processing."""
+    enable_language_detection: bool = True
+    enable_chinese_optimization: bool = True
+    default_language: str = "en"  # Default language when detection fails
+    preferred_languages: List[str] = field(default_factory=lambda: ["en", "zh-CN", "zh-TW"])
+    chinese_prompt_optimization: bool = True
+    language_confidence_threshold: float = 0.5
+    mixed_language_handling: str = "primary"  # "primary", "segment", "dual"
+    preserve_chinese_encoding: bool = True
+    enable_transcript_language_preference: bool = True
+
+
+@dataclass
 class WorkflowConfig:
     """Complete workflow configuration."""
     execution_mode: NodeExecutionMode = NodeExecutionMode.SEQUENTIAL
@@ -221,6 +266,7 @@ class WorkflowConfig:
     data_flow_config: DataFlowConfig = field(default_factory=DataFlowConfig)
     fallback_strategy: FallbackStrategy = field(default_factory=FallbackStrategy)
     circuit_breaker_config: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
+    language_processing: LanguageProcessingConfig = field(default_factory=LanguageProcessingConfig)
     enable_monitoring: bool = True
     enable_fallbacks: bool = True
     max_retries: int = 2
@@ -337,6 +383,13 @@ class YouTubeSummarizerFlow(Flow):
         self.circuit_breakers: Dict[str, CircuitBreaker] = {}
         self.fallback_attempts: Dict[str, int] = {}
         
+        # Initialize language detection
+        self.language_detector = None
+        self.detected_language_result: Optional[LanguageDetectionResult] = None
+        if self.config.language_processing.enable_language_detection:
+            self.language_detector = YouTubeLanguageDetector()
+            logger.debug("Language detector initialized")
+        
         # Initialize nodes with configuration
         self._initialize_configured_nodes()
         
@@ -349,6 +402,214 @@ class YouTubeSummarizerFlow(Flow):
         
         logger.info(f"YouTubeSummarizerFlow initialized with {len(self.nodes)} nodes (config: {self.config.execution_mode.value})")
     
+    def _detect_video_language(self, video_metadata: Dict[str, Any], transcript_text: Optional[str] = None) -> LanguageDetectionResult:
+        """
+        Detect the language of the video using metadata and transcript.
+        
+        Args:
+            video_metadata: Video metadata from YouTube
+            transcript_text: Optional transcript text for analysis
+            
+        Returns:
+            LanguageDetectionResult with detection information
+        """
+        if not self.language_detector:
+            # Return default English result if language detection is disabled
+            return LanguageDetectionResult(
+                detected_language=LanguageCode.ENGLISH,
+                confidence_score=0.5,
+                detection_method="default_fallback"
+            )
+        
+        try:
+            logger.info("Starting video language detection")
+            
+            # Perform comprehensive language detection
+            detection_result = self.language_detector.detect_language_comprehensive(
+                video_metadata, transcript_text
+            )
+            
+            # Cache the result for use by other nodes
+            self.detected_language_result = detection_result
+            
+            logger.info(f"Language detected: {detection_result.detected_language.value} "
+                       f"(confidence: {detection_result.confidence_score:.3f}, "
+                       f"method: {detection_result.detection_method})")
+            
+            return detection_result
+            
+        except Exception as e:
+            logger.warning(f"Language detection failed: {str(e)}, using default")
+            # Return default language on failure
+            fallback_result = LanguageDetectionResult(
+                detected_language=LanguageCode.ENGLISH if self.config.language_processing.default_language == "en" else LanguageCode.CHINESE_GENERIC,
+                confidence_score=0.1,
+                detection_method="error_fallback"
+            )
+            self.detected_language_result = fallback_result
+            return fallback_result
+    
+    def _apply_language_specific_processing(self, text: str, task_type: str = "summarization") -> Dict[str, str]:
+        """
+        Apply language-specific processing optimizations.
+        
+        Args:
+            text: Text content to process
+            task_type: Type of task (summarization, keywords, timestamps)
+            
+        Returns:
+            Dictionary with optimized prompts and content
+        """
+        if not self.detected_language_result:
+            # No language detection available, return basic processing
+            return {
+                'system_prompt': f"Process the following content for {task_type}:",
+                'user_prompt': text,
+                'optimized_text': text
+            }
+        
+        detected_lang = self.detected_language_result.detected_language
+        
+        # Check if this is Chinese content and optimization is enabled
+        if (detected_lang in [LanguageCode.CHINESE_SIMPLIFIED, LanguageCode.CHINESE_TRADITIONAL, LanguageCode.CHINESE_GENERIC] and
+            self.config.language_processing.enable_chinese_optimization):
+            
+            logger.debug(f"Applying Chinese optimization for {task_type}")
+            
+            # Ensure proper encoding for Chinese content
+            if self.config.language_processing.preserve_chinese_encoding:
+                text = ensure_chinese_encoding(text)
+            
+            # Apply Chinese-specific optimization
+            return optimize_chinese_content_for_llm(text, task_type)
+        
+        else:
+            # English or other language - use standard processing
+            logger.debug(f"Applying standard processing for {detected_lang.value}")
+            return {
+                'system_prompt': f"Process the following content for {task_type}. Provide a clear and comprehensive response.",
+                'user_prompt': text,
+                'optimized_text': text
+            }
+    
+    def _get_preferred_transcript_languages_for_video(self) -> List[str]:
+        """
+        Get preferred transcript languages based on detected video language.
+        
+        Returns:
+            List of language codes in order of preference
+        """
+        if not self.detected_language_result:
+            return self.config.language_processing.preferred_languages
+        
+        if self.config.language_processing.enable_transcript_language_preference:
+            # Use language detection result to determine transcript preferences
+            return get_preferred_transcript_languages(
+                {'language': self.detected_language_result.detected_language.value}
+            )
+        else:
+            return self.config.language_processing.preferred_languages
+    
+    def _handle_mixed_language_content(self, text: str) -> Dict[str, Any]:
+        """
+        Handle mixed-language content based on configuration.
+        
+        Args:
+            text: Text content that may contain multiple languages
+            
+        Returns:
+            Dictionary with processing strategy and segmented content if applicable
+        """
+        if not self.detected_language_result:
+            return {'strategy': 'single', 'content': text}
+        
+        strategy = self.config.language_processing.mixed_language_handling
+        
+        # Check if we have mixed-language analysis available
+        mixed_analysis = None
+        language_result = self.store.get('language_detection_result', {})
+        if language_result and 'mixed_language_analysis' in language_result:
+            mixed_analysis = language_result['mixed_language_analysis']
+        
+        if strategy == "primary":
+            # Use primary detected language for entire content
+            primary_language = self.detected_language_result.detected_language.value
+            
+            # If we have mixed-language analysis, use its primary language
+            if mixed_analysis and mixed_analysis.get('primary_language'):
+                primary_language = mixed_analysis['primary_language']
+            
+            return {
+                'strategy': 'primary',
+                'content': text,
+                'primary_language': primary_language,
+                'is_mixed': mixed_analysis.get('is_mixed', False) if mixed_analysis else False
+            }
+        
+        elif strategy == "segment":
+            # Segment by language using the new functions
+            logger.debug("Applying language segmentation")
+            
+            if mixed_analysis and mixed_analysis.get('is_mixed', False):
+                # Perform actual segmentation
+                segmentation_result = segment_mixed_language_content(text)
+                
+                return {
+                    'strategy': 'segment',
+                    'content': text,
+                    'segmentation_result': segmentation_result,
+                    'segments': segmentation_result.get('segments', []),
+                    'is_mixed': True,
+                    'primary_language': segmentation_result.get('primary_language', 'en')
+                }
+            else:
+                # Not mixed content, treat as single language
+                return {
+                    'strategy': 'primary',
+                    'content': text,
+                    'primary_language': self.detected_language_result.detected_language.value,
+                    'is_mixed': False
+                }
+        
+        elif strategy == "dual":
+            # Dual-language processing: process in both detected languages
+            logger.debug("Applying dual-language processing")
+            
+            if mixed_analysis and mixed_analysis.get('is_mixed', False):
+                # Get language distribution from mixed analysis
+                language_distribution = mixed_analysis.get('language_distribution', {})
+                
+                # Find the top 2 languages
+                sorted_languages = sorted(
+                    language_distribution.items(), 
+                    key=lambda x: x[1].get('percentage', 0), 
+                    reverse=True
+                )
+                
+                primary_lang = sorted_languages[0][0] if sorted_languages else 'en'
+                secondary_lang = sorted_languages[1][0] if len(sorted_languages) > 1 else None
+                
+                return {
+                    'strategy': 'dual',
+                    'content': text,
+                    'primary_language': primary_lang,
+                    'secondary_language': secondary_lang,
+                    'language_distribution': language_distribution,
+                    'is_mixed': True
+                }
+            else:
+                # Not mixed content, fallback to primary
+                return {
+                    'strategy': 'primary',
+                    'content': text,
+                    'primary_language': self.detected_language_result.detected_language.value,
+                    'is_mixed': False
+                }
+        
+        else:
+            # Default to single language processing
+            return {'strategy': 'single', 'content': text}
+
     def _create_node_metrics(self, node_name: str) -> NodeMetrics:
         """Create metrics tracking for a node."""
         current_time = time.time()
@@ -661,6 +922,7 @@ class YouTubeSummarizerFlow(Flow):
             data_flow_config=data_flow_config,
             fallback_strategy=FallbackStrategy(),
             circuit_breaker_config=CircuitBreakerConfig(),
+            language_processing=LanguageProcessingConfig(),
             enable_monitoring=enable_monitoring,
             enable_fallbacks=enable_fallbacks,
             max_retries=max_retries,
@@ -945,6 +1207,13 @@ class YouTubeSummarizerFlow(Flow):
             self.store = Store()
             self.store.update(input_data)
             
+            # Add language preferences if enabled
+            if self.config.language_processing.enable_language_detection:
+                # Store default language preferences for initial transcript acquisition
+                default_preferences = self.config.language_processing.preferred_languages
+                self.store['default_language_preferences'] = default_preferences
+                logger.debug(f"Stored default language preferences: {default_preferences}")
+            
             # Record setup duration
             if self.enable_monitoring and self.metrics:
                 self.metrics.setup_duration = time.time() - setup_start_time
@@ -1101,6 +1370,43 @@ class YouTubeSummarizerFlow(Flow):
                         # Optional node failure - log warning and continue
                         logger.warning(f"Optional node {node.name} failed, continuing")
                         continue
+                
+                # Perform language detection after transcript node completes
+                if (node.name == "YouTubeTranscriptNode" and 
+                    node_result.get('post', {}).get('post_status') == 'success' and
+                    self.config.language_processing.enable_language_detection):
+                    
+                    video_metadata = self.store.get('video_metadata', {})
+                    transcript_data = self.store.get('transcript_data', {})
+                    transcript_text = transcript_data.get('transcript_text', '')
+                    
+                    # Perform language detection
+                    language_result = self._detect_video_language(video_metadata, transcript_text)
+                    
+                    # Perform mixed-language content analysis
+                    mixed_language_analysis = None
+                    if transcript_text and self.config.language_processing.mixed_language_handling != "disabled":
+                        mixed_language_analysis = detect_mixed_language_content(transcript_text)
+                        logger.info(f"Mixed-language analysis: is_mixed={mixed_language_analysis['is_mixed']}, "
+                                   f"primary={mixed_language_analysis['primary_language']}")
+                    
+                    # Store language detection result
+                    self.store['language_detection_result'] = {
+                        'detected_language': language_result.detected_language.value,
+                        'confidence_score': language_result.confidence_score,
+                        'detection_method': language_result.detection_method,
+                        'metadata_language': language_result.metadata_language,
+                        'title_language': language_result.title_language,
+                        'description_language': language_result.description_language,
+                        'transcript_language': language_result.transcript_language,
+                        'alternative_languages': [(lang.value, score) for lang, score in language_result.alternative_languages],
+                        'detection_timestamp': language_result.detection_timestamp,
+                        'is_chinese': language_result.detected_language in [LanguageCode.CHINESE_SIMPLIFIED, LanguageCode.CHINESE_TRADITIONAL, LanguageCode.CHINESE_GENERIC],
+                        'is_english': language_result.detected_language == LanguageCode.ENGLISH,
+                        'mixed_language_analysis': mixed_language_analysis
+                    }
+                    
+                    logger.info(f"Language detection completed and stored in workflow data")
                 
                 # Map output data based on configuration
                 if node_result.get('post', {}).get('post_status') == 'success':
@@ -1396,6 +1702,7 @@ class YouTubeSummarizerFlow(Flow):
             timestamp_data = self.store.get('timestamp_data', {})
             keyword_data = self.store.get('keyword_data', {})
             video_metadata = self.store.get('video_metadata', {})
+            language_detection_result = self.store.get('language_detection_result', {})
             
             # Prepare final response
             final_result = {
@@ -1414,7 +1721,8 @@ class YouTubeSummarizerFlow(Flow):
                     'timestamp_count': len(timestamp_data.get('timestamps', [])),
                     'keyword_count': len(keyword_data.get('keywords', [])),
                     'summary_word_count': summary_data.get('word_count', 0),
-                    'workflow_version': '1.0'
+                    'workflow_version': '1.0',
+                    'language_detection': language_detection_result
                 },
                 'timestamp': datetime.utcnow().isoformat()
             }
@@ -1830,6 +2138,19 @@ def create_custom_workflow_config(
         enabled=kwargs.get('enable_circuit_breaker', True)
     )
     
+    # Create language processing config with user overrides
+    language_processing_config = LanguageProcessingConfig(
+        enable_language_detection=kwargs.get('enable_language_detection', True),
+        enable_chinese_optimization=kwargs.get('enable_chinese_optimization', True),
+        default_language=kwargs.get('default_language', 'en'),
+        preferred_languages=kwargs.get('preferred_languages', ["en", "zh-CN", "zh-TW"]),
+        chinese_prompt_optimization=kwargs.get('chinese_prompt_optimization', True),
+        language_confidence_threshold=kwargs.get('language_confidence_threshold', 0.5),
+        mixed_language_handling=kwargs.get('mixed_language_handling', 'primary'),
+        preserve_chinese_encoding=kwargs.get('preserve_chinese_encoding', True),
+        enable_transcript_language_preference=kwargs.get('enable_transcript_language_preference', True)
+    )
+
     # Create workflow config
     workflow_config = WorkflowConfig(
         execution_mode=execution_mode,
@@ -1837,6 +2158,7 @@ def create_custom_workflow_config(
         data_flow_config=data_flow_config,
         fallback_strategy=fallback_strategy,
         circuit_breaker_config=circuit_breaker_config,
+        language_processing=language_processing_config,
         enable_monitoring=kwargs.get('enable_monitoring', True),
         enable_fallbacks=kwargs.get('enable_fallbacks', True),
         max_retries=kwargs.get('max_retries', 2),
@@ -1846,6 +2168,93 @@ def create_custom_workflow_config(
     
     logger.info(f"Created custom workflow config with {len(node_config_objects)} nodes")
     return workflow_config
+
+
+def create_chinese_optimized_config(**kwargs) -> WorkflowConfig:
+    """
+    Create a workflow configuration optimized for Chinese video content.
+    
+    Args:
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        WorkflowConfig optimized for Chinese content processing
+    """
+    # Chinese-specific defaults
+    chinese_defaults = {
+        'enable_language_detection': True,
+        'enable_chinese_optimization': True,
+        'default_language': 'zh-CN',
+        'preferred_languages': ['zh-CN', 'zh-TW', 'zh', 'en'],
+        'chinese_prompt_optimization': True,
+        'language_confidence_threshold': 0.3,  # Lower threshold for better Chinese detection
+        'mixed_language_handling': 'primary',
+        'preserve_chinese_encoding': True,
+        'enable_transcript_language_preference': True
+    }
+    
+    # Merge with user overrides
+    config_params = {**chinese_defaults, **kwargs}
+    
+    return create_custom_workflow_config(**config_params)
+
+
+def create_english_optimized_config(**kwargs) -> WorkflowConfig:
+    """
+    Create a workflow configuration optimized for English video content.
+    
+    Args:
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        WorkflowConfig optimized for English content processing
+    """
+    # English-specific defaults
+    english_defaults = {
+        'enable_language_detection': True,
+        'enable_chinese_optimization': False,
+        'default_language': 'en',
+        'preferred_languages': ['en', 'en-US', 'en-GB', 'en-CA'],
+        'chinese_prompt_optimization': False,
+        'language_confidence_threshold': 0.5,
+        'mixed_language_handling': 'primary',
+        'preserve_chinese_encoding': False,
+        'enable_transcript_language_preference': True
+    }
+    
+    # Merge with user overrides
+    config_params = {**english_defaults, **kwargs}
+    
+    return create_custom_workflow_config(**config_params)
+
+
+def create_multilingual_config(**kwargs) -> WorkflowConfig:
+    """
+    Create a workflow configuration optimized for multilingual video content.
+    
+    Args:
+        **kwargs: Additional configuration parameters
+        
+    Returns:
+        WorkflowConfig optimized for mixed-language content processing
+    """
+    # Multilingual-specific defaults
+    multilingual_defaults = {
+        'enable_language_detection': True,
+        'enable_chinese_optimization': True,
+        'default_language': 'en',
+        'preferred_languages': ['en', 'zh-CN', 'zh-TW', 'zh', 'ja', 'ko', 'es', 'fr'],
+        'chinese_prompt_optimization': True,
+        'language_confidence_threshold': 0.4,
+        'mixed_language_handling': 'segment',  # Use segmentation for mixed content
+        'preserve_chinese_encoding': True,
+        'enable_transcript_language_preference': True
+    }
+    
+    # Merge with user overrides
+    config_params = {**multilingual_defaults, **kwargs}
+    
+    return create_custom_workflow_config(**config_params)
 
 
 # Convenience function for direct usage

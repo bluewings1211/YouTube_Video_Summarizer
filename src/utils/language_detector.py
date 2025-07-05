@@ -569,6 +569,172 @@ def get_preferred_transcript_languages(video_metadata: Dict[str, Any], transcrip
     return detector.get_preferred_transcript_languages(result)
 
 
+def detect_mixed_language_content(text: str, chunk_size: int = 500) -> Dict[str, Any]:
+    """
+    Detect mixed-language content by analyzing text segments.
+    
+    Args:
+        text: Text content to analyze for mixed languages
+        chunk_size: Size of chunks to analyze for language switching
+        
+    Returns:
+        Dictionary with mixed-language analysis results
+    """
+    if not text or not text.strip():
+        return {
+            'is_mixed': False,
+            'primary_language': 'en',
+            'segments': [],
+            'language_distribution': {}
+        }
+    
+    detector = YouTubeLanguageDetector()
+    
+    # Split text into chunks for analysis
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size):
+        chunk_text = ' '.join(words[i:i + chunk_size])
+        chunks.append(chunk_text)
+    
+    # Analyze each chunk
+    chunk_languages = []
+    language_counts = {}
+    
+    for i, chunk in enumerate(chunks):
+        scores = detector._analyze_text_content(chunk)
+        best_language = max(scores.items(), key=lambda x: x[1])
+        
+        if best_language[1] > 0.3:  # Minimum confidence threshold
+            detected_lang = best_language[0].value
+            chunk_languages.append({
+                'chunk_index': i,
+                'language': detected_lang,
+                'confidence': best_language[1],
+                'text_preview': chunk[:100] + "..." if len(chunk) > 100 else chunk
+            })
+            
+            # Count language occurrences
+            language_counts[detected_lang] = language_counts.get(detected_lang, 0) + 1
+    
+    # Determine if content is mixed
+    unique_languages = set(segment['language'] for segment in chunk_languages)
+    is_mixed = len(unique_languages) > 1
+    
+    # Calculate language distribution
+    total_chunks = len(chunk_languages)
+    language_distribution = {}
+    if total_chunks > 0:
+        for lang, count in language_counts.items():
+            language_distribution[lang] = {
+                'percentage': (count / total_chunks) * 100,
+                'chunk_count': count
+            }
+    
+    # Determine primary language
+    primary_language = 'en'  # Default
+    if language_distribution:
+        primary_language = max(language_distribution.items(), key=lambda x: x[1]['percentage'])[0]
+    
+    return {
+        'is_mixed': is_mixed,
+        'primary_language': primary_language,
+        'unique_languages': list(unique_languages),
+        'segments': chunk_languages,
+        'language_distribution': language_distribution,
+        'total_chunks_analyzed': total_chunks,
+        'confidence_threshold': 0.3
+    }
+
+
+def segment_mixed_language_content(text: str, target_languages: List[str] = None) -> Dict[str, Any]:
+    """
+    Segment mixed-language content into language-specific sections.
+    
+    Args:
+        text: Text content to segment
+        target_languages: List of target languages to segment for
+        
+    Returns:
+        Dictionary with segmented content by language
+    """
+    if target_languages is None:
+        target_languages = ['en', 'zh-CN', 'zh-TW', 'zh']
+    
+    mixed_analysis = detect_mixed_language_content(text)
+    
+    if not mixed_analysis['is_mixed']:
+        # Not mixed content, return as single segment
+        return {
+            'is_segmented': False,
+            'primary_language': mixed_analysis['primary_language'],
+            'segments': [{
+                'language': mixed_analysis['primary_language'],
+                'content': text,
+                'start_position': 0,
+                'end_position': len(text),
+                'confidence': 0.9
+            }]
+        }
+    
+    # Group consecutive chunks by language
+    segments = []
+    current_segment = None
+    
+    words = text.split()
+    chunk_size = 500
+    
+    for segment_info in mixed_analysis['segments']:
+        chunk_index = segment_info['chunk_index']
+        language = segment_info['language']
+        confidence = segment_info['confidence']
+        
+        # Calculate word positions for this chunk
+        start_word = chunk_index * chunk_size
+        end_word = min((chunk_index + 1) * chunk_size, len(words))
+        chunk_text = ' '.join(words[start_word:end_word])
+        
+        # If same language as current segment, extend it
+        if (current_segment and 
+            current_segment['language'] == language and
+            current_segment['end_word'] == start_word):
+            
+            current_segment['content'] += ' ' + chunk_text
+            current_segment['end_word'] = end_word
+            current_segment['confidence'] = (current_segment['confidence'] + confidence) / 2
+        else:
+            # Start new segment
+            if current_segment:
+                segments.append(current_segment)
+            
+            current_segment = {
+                'language': language,
+                'content': chunk_text,
+                'start_word': start_word,
+                'end_word': end_word,
+                'confidence': confidence
+            }
+    
+    # Add the last segment
+    if current_segment:
+        segments.append(current_segment)
+    
+    # Calculate character positions
+    char_position = 0
+    for segment in segments:
+        segment['start_position'] = char_position
+        segment['end_position'] = char_position + len(segment['content'])
+        char_position = segment['end_position'] + 1  # +1 for space between segments
+    
+    return {
+        'is_segmented': True,
+        'primary_language': mixed_analysis['primary_language'],
+        'segments': segments,
+        'total_segments': len(segments),
+        'language_distribution': mixed_analysis['language_distribution']
+    }
+
+
 def detect_language(text: str) -> str:
     """
     Simple language detection for text content.

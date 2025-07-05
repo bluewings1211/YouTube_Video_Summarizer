@@ -1884,10 +1884,23 @@ class YouTubeTranscriptFetcher:
                 if self.acquisition_logger:
                     self.acquisition_logger.log_video_metadata(video_id, None)
         
-        # Build three-tier strategy
+        # Enhance language preferences with detection if available
+        enhanced_preferred_languages = preferred_languages
+        if video_metadata and not preferred_languages:
+            try:
+                # Perform language detection on metadata to get preferred transcript languages
+                from .language_detector import get_preferred_transcript_languages
+                enhanced_preferred_languages = get_preferred_transcript_languages(video_metadata)
+                logger.info(f"Enhanced language preferences from detection: {enhanced_preferred_languages}")
+            except ImportError:
+                logger.debug("Language detector not available, using default language preferences")
+            except Exception as e:
+                logger.warning(f"Language detection failed, using default preferences: {str(e)}")
+        
+        # Build three-tier strategy with enhanced language preferences
         try:
             strategy_order = self.three_tier_strategy.get_transcript_strategy(
-                video_id, preferred_languages, video_metadata
+                video_id, enhanced_preferred_languages, video_metadata
             )
             
             if not strategy_order:

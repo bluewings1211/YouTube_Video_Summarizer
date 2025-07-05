@@ -341,12 +341,35 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
+                # Get language preferences from store
+                preferred_languages = None
+                
+                # First, check if we have language detection results (from previous execution)
+                language_detection_result = store.get('language_detection_result', {})
+                if language_detection_result and language_detection_result.get('detected_language'):
+                    try:
+                        # Import here to avoid circular dependencies
+                        from src.utils.language_detector import get_preferred_transcript_languages
+                        
+                        # Create metadata dict for language preference detection
+                        video_metadata = {'language': language_detection_result['detected_language']}
+                        preferred_languages = get_preferred_transcript_languages(video_metadata)
+                        self.logger.debug(f"Using detected language preferences: {preferred_languages}")
+                    except Exception as e:
+                        self.logger.debug(f"Could not determine language preferences: {str(e)}")
+                
+                # Fallback to default language preferences if available
+                if not preferred_languages:
+                    preferred_languages = store.get('default_language_preferences')
+                    if preferred_languages:
+                        self.logger.debug(f"Using default language preferences: {preferred_languages}")
+                
                 # Choose acquisition method based on configuration
                 if self.enable_enhanced_acquisition:
                     # Use enhanced three-tier strategy with intelligent fallback
                     transcript_data = self.transcript_fetcher.fetch_transcript_with_three_tier_strategy(
                         video_id=video_id,
-                        preferred_languages=None,  # Auto-detect from video metadata
+                        preferred_languages=preferred_languages,  # Use language detection preferences
                         include_metadata=True,
                         check_unsupported=False,  # Already checked in prep phase
                         max_duration_seconds=1800,
@@ -626,20 +649,51 @@ class SummarizationNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
+                # Get language detection results for language-specific processing
+                language_detection_result = store.get('language_detection_result', {})
+                detected_language = language_detection_result.get('detected_language', 'en')
+                is_chinese = language_detection_result.get('is_chinese', False)
+                
+                # Apply language-specific text preprocessing if needed
+                processed_text = transcript_text
+                if is_chinese:
+                    try:
+                        # Import here to avoid circular dependencies
+                        from src.utils.language_detector import ensure_chinese_encoding
+                        processed_text = ensure_chinese_encoding(transcript_text)
+                        self.logger.debug("Applied Chinese encoding preservation")
+                    except Exception as e:
+                        self.logger.debug(f"Could not apply Chinese encoding: {str(e)}")
+                
                 # Create task requirements for smart model selection
                 task_requirements = detect_task_requirements(
-                    text=transcript_text,
+                    text=processed_text,
                     task_type="summarization",
                     quality_level="medium"
                 )
                 
-                # Generate summary with smart client and Chinese optimization
-                summary_result = self.smart_llm_client.generate_text_with_chinese_optimization(
-                    text=transcript_text,
-                    task_requirements=task_requirements,
-                    max_tokens=800,  # Allow extra tokens for 500-word summary
-                    temperature=0.3  # Lower temperature for consistent summaries
-                )
+                # Add language information to task requirements
+                if detected_language:
+                    task_requirements.language = detected_language
+                    task_requirements.is_chinese = is_chinese
+                
+                # Generate summary with smart client and language-aware optimization
+                if is_chinese:
+                    # Use Chinese-optimized processing
+                    summary_result = self.smart_llm_client.generate_text_with_chinese_optimization(
+                        text=processed_text,
+                        task_requirements=task_requirements,
+                        max_tokens=800,  # Allow extra tokens for 500-word summary
+                        temperature=0.3  # Lower temperature for consistent summaries
+                    )
+                else:
+                    # Use standard processing for English/other languages
+                    summary_result = self.smart_llm_client.generate_text(
+                        text=processed_text,
+                        task_requirements=task_requirements,
+                        max_tokens=800,
+                        temperature=0.3
+                    )
                 
                 # Extract and validate summary text
                 summary_text = summary_result['text']
@@ -715,6 +769,19 @@ class SummarizationNode(BaseProcessingNode):
             summary_word_count = exec_result['summary_word_count']
             video_id = exec_result['video_id']
             video_title = exec_result['video_title']
+            
+            # Apply language-specific post-processing
+            language_detection_result = store.get('language_detection_result', {})
+            is_chinese = language_detection_result.get('is_chinese', False)
+            
+            # Ensure Chinese content encoding is preserved
+            if is_chinese and summary_text:
+                try:
+                    from src.utils.language_detector import ensure_chinese_encoding
+                    summary_text = ensure_chinese_encoding(summary_text)
+                    self.logger.debug("Applied Chinese encoding preservation to summary")
+                except Exception as e:
+                    self.logger.debug(f"Could not apply Chinese encoding to summary: {str(e)}")
             
             # Prepare store data
             store_data = {
@@ -913,6 +980,11 @@ class TimestampNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
+                # Get language detection results for language-specific processing
+                language_detection_result = store.get('language_detection_result', {})
+                detected_language = language_detection_result.get('detected_language', 'en')
+                is_chinese = language_detection_result.get('is_chinese', False)
+                
                 # Create task requirements for smart model selection
                 transcript_text = self._format_transcript_for_analysis(raw_transcript)
                 task_requirements = detect_task_requirements(
@@ -921,12 +993,18 @@ class TimestampNode(BaseProcessingNode):
                     quality_level="medium"
                 )
                 
-                # Generate timestamps using smart client
+                # Add language information to task requirements
+                if detected_language:
+                    task_requirements.language = detected_language
+                    task_requirements.is_chinese = is_chinese
+                
+                # Generate timestamps using smart client with language awareness
                 timestamps_result = self._generate_timestamps_with_smart_client(
                     raw_transcript,
                     video_id,
                     timestamp_count,
-                    task_requirements
+                    task_requirements,
+                    is_chinese=is_chinese
                 )
                 
                 # Validate generated timestamps
@@ -1154,7 +1232,8 @@ class TimestampNode(BaseProcessingNode):
         raw_transcript: List[Dict[str, Any]], 
         video_id: str, 
         count: int,
-        task_requirements: TaskRequirements
+        task_requirements: TaskRequirements,
+        is_chinese: bool = False
     ) -> Dict[str, Any]:
         """Generate timestamps using the smart LLM client."""
         # Format transcript for processing
@@ -1182,13 +1261,23 @@ For each timestamp, provide:
 Format each entry as:
 [XXX.X]s (Rating: X/10) - Description"""
 
-        # Generate with smart client
-        result = self.smart_llm_client.generate_text_with_chinese_optimization(
-            text=transcript_text,
-            task_requirements=task_requirements,
-            max_tokens=600,
-            temperature=0.4
-        )
+        # Generate with smart client using language-appropriate method
+        if is_chinese:
+            # Use Chinese-optimized processing
+            result = self.smart_llm_client.generate_text_with_chinese_optimization(
+                text=transcript_text,
+                task_requirements=task_requirements,
+                max_tokens=600,
+                temperature=0.4
+            )
+        else:
+            # Use standard processing for English/other languages
+            result = self.smart_llm_client.generate_text(
+                text=transcript_text,
+                task_requirements=task_requirements,
+                max_tokens=600,
+                temperature=0.4
+            )
         
         # Parse the timestamps from the response
         timestamps_text = result['text']
@@ -1353,6 +1442,11 @@ class KeywordExtractionNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
+                # Get language detection results for language-specific processing
+                language_detection_result = store.get('language_detection_result', {})
+                detected_language = language_detection_result.get('detected_language', 'en')
+                is_chinese = language_detection_result.get('is_chinese', False)
+                
                 # Create task requirements for smart model selection
                 task_requirements = detect_task_requirements(
                     text=extraction_text,
@@ -1360,11 +1454,17 @@ class KeywordExtractionNode(BaseProcessingNode):
                     quality_level="medium"
                 )
                 
-                # Generate keywords using smart client
+                # Add language information to task requirements
+                if detected_language:
+                    task_requirements.language = detected_language
+                    task_requirements.is_chinese = is_chinese
+                
+                # Generate keywords using smart client with language awareness
                 keywords_result = self._generate_keywords_with_smart_client(
                     extraction_text,
                     keyword_count,
-                    task_requirements
+                    task_requirements,
+                    is_chinese=is_chinese
                 )
                 
                 # Validate extracted keywords
@@ -1521,7 +1621,8 @@ class KeywordExtractionNode(BaseProcessingNode):
         self,
         text: str,
         count: int,
-        task_requirements: TaskRequirements
+        task_requirements: TaskRequirements,
+        is_chinese: bool = False
     ) -> Dict[str, Any]:
         """Generate keywords using the smart LLM client."""
         
@@ -1541,13 +1642,23 @@ Guidelines:
 
 Please provide exactly {count} keywords, one per line, without numbering or bullets:"""
 
-        # Generate with smart client
-        result = self.smart_llm_client.generate_text_with_chinese_optimization(
-            text=text,
-            task_requirements=task_requirements,
-            max_tokens=300,
-            temperature=0.2
-        )
+        # Generate with smart client using language-appropriate method
+        if is_chinese:
+            # Use Chinese-optimized processing
+            result = self.smart_llm_client.generate_text_with_chinese_optimization(
+                text=text,
+                task_requirements=task_requirements,
+                max_tokens=300,
+                temperature=0.2
+            )
+        else:
+            # Use standard processing for English/other languages
+            result = self.smart_llm_client.generate_text(
+                text=text,
+                task_requirements=task_requirements,
+                max_tokens=300,
+                temperature=0.2
+            )
         
         # Parse keywords from response
         keywords_text = result['text'].strip()
