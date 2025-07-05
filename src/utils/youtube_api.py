@@ -14,6 +14,7 @@ import json
 import urllib.request
 import urllib.parse
 import time
+import requests
 from contextlib import contextmanager
 
 try:
@@ -36,6 +37,7 @@ except ImportError:
 
 from src.utils.validators import YouTubeURLValidator
 from src.utils.language_detector import YouTubeLanguageDetector, LanguageDetectionResult
+from src.utils.proxy_manager import get_proxy_manager, get_retry_manager
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -497,29 +499,48 @@ class YouTubeVideoMetadataExtractor:
             raise YouTubeTranscriptError(f"Invalid video ID format: {video_id}")
         
         try:
-            # Fetch video page to extract metadata
+            # Fetch video page to extract metadata using proxy manager
             url = f"https://www.youtube.com/watch?v={video_id}"
             
-            # Create request with user agent
-            request = urllib.request.Request(url)
-            request.add_header('User-Agent', self.user_agent)
+            # Use proxy manager with retry logic
+            proxy_manager = get_proxy_manager()
+            retry_manager = get_retry_manager()
             
-            # Get page content
-            with urllib.request.urlopen(request) as response:
-                page_content = response.read().decode('utf-8')
+            with retry_manager.retry_context("metadata_extraction"):
+                with proxy_manager.request_context() as (session, proxy):
+                    # Configure headers
+                    headers = {
+                        'User-Agent': self.user_agent,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1'
+                    }
+                    
+                    # Make request with proxy support
+                    logger.debug(f"Fetching metadata for {video_id} via proxy: {proxy.url if proxy else 'direct'}")
+                    
+                    response = session.get(url, headers=headers, timeout=30)
+                    response.raise_for_status()
+                    
+                    page_content = response.text
+                    
+                    # Log successful metadata retrieval
+                    logger.info(f"Successfully fetched metadata for {video_id}")
             
             # Extract metadata from page
             metadata = self._parse_metadata_from_page(page_content, video_id)
             
             return metadata
             
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
                 raise YouTubeTranscriptError("Video not found")
-            elif e.code == 403:
+            elif e.response.status_code == 403:
                 raise YouTubeTranscriptError("Access denied to video")
             else:
-                raise YouTubeTranscriptError(f"HTTP error {e.code}: {e.reason}")
+                raise YouTubeTranscriptError(f"HTTP error {e.response.status_code}: {e.response.reason}")
                 
         except Exception as e:
             logger.error(f"Error extracting metadata for {video_id}: {str(e)}")
@@ -718,10 +739,11 @@ class YouTubeVideoMetadataExtractor:
             YouTubeTranscriptError: If video cannot be analyzed
         """
         try:
-            from youtube_transcript_api import YouTubeTranscriptApi
+            # Use proxy-aware transcript API
+            proxy_api = ProxyAwareTranscriptApi()
             
             # Try to list available transcripts
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_list = proxy_api.list_transcripts(video_id)
             
             available_transcripts = []
             for transcript in transcript_list:
@@ -962,9 +984,10 @@ class ThreeTierTranscriptStrategy:
             raise YouTubeTranscriptError(f"Failed to analyze transcript options: {str(e)}", video_id)
     
     def _get_available_transcripts(self, video_id: str):
-        """Get available transcripts from YouTube API."""
+        """Get available transcripts from YouTube API using proxy support."""
         try:
-            return YouTubeTranscriptApi.list_transcripts(video_id)
+            proxy_api = ProxyAwareTranscriptApi()
+            return proxy_api.list_transcripts(video_id)
         except Exception as e:
             self.logger.debug(f"Failed to list transcripts for {video_id}: {str(e)}")
             raise
@@ -1121,12 +1144,190 @@ class ThreeTierTranscriptStrategy:
             }
 
 
+class ProxyAwareTranscriptApi:
+    """
+    Proxy-aware wrapper for YouTubeTranscriptApi.
+    
+    This class provides proxy support for YouTube transcript API calls by 
+    monkey-patching the underlying HTTP requests.
+    """
+    
+    def __init__(self):
+        self.proxy_manager = get_proxy_manager()
+        self.retry_manager = get_retry_manager()
+        
+    def _patch_transcript_api(self, proxy_info):
+        """
+        Temporarily patch the YouTubeTranscriptApi to use proxy.
+        
+        Args:
+            proxy_info: Proxy information from proxy manager
+        """
+        try:
+            if proxy_info and hasattr(urllib.request, 'ProxyHandler'):
+                # Create proxy handler
+                proxy_dict = {
+                    'http': proxy_info.url,
+                    'https': proxy_info.url
+                }
+                
+                proxy_handler = urllib.request.ProxyHandler(proxy_dict)
+                opener = urllib.request.build_opener(proxy_handler)
+                
+                # Install the proxy opener
+                urllib.request.install_opener(opener)
+                
+                logger.debug(f"Successfully installed proxy handler for transcript API: {proxy_info.url}")
+            else:
+                logger.debug("No proxy info provided or ProxyHandler not available, using direct connection")
+                
+        except Exception as e:
+            logger.error(f"Failed to install proxy handler for {proxy_info.url if proxy_info else 'None'}: {e}")
+            # Continue without proxy
+            pass
+    
+    def _restore_transcript_api(self):
+        """Restore original YouTubeTranscriptApi behavior."""
+        try:
+            # Create a new opener without proxy
+            opener = urllib.request.build_opener()
+            urllib.request.install_opener(opener)
+            
+            logger.debug("Successfully restored original transcript API behavior")
+        except Exception as e:
+            logger.error(f"Failed to restore original transcript API behavior: {e}")
+            # This is not critical, continue
+    
+    def get_transcript(self, video_id: str, languages: Optional[List[str]] = None):
+        """
+        Get transcript with proxy support.
+        
+        Args:
+            video_id: YouTube video ID
+            languages: Preferred languages for transcript
+            
+        Returns:
+            Transcript data
+        """
+        operation_name = f"transcript_fetch_{video_id}"
+        
+        with self.retry_manager.retry_context(operation_name):
+            with self.proxy_manager.request_context() as (session, proxy):
+                try:
+                    # Apply proxy to transcript API
+                    self._patch_transcript_api(proxy)
+                    
+                    # Log the request with detailed information
+                    lang_str = f"languages={languages}" if languages else "default_languages"
+                    proxy_str = proxy.url if proxy else 'direct'
+                    logger.debug(f"Fetching transcript for {video_id} ({lang_str}) via {proxy_str}")
+                    
+                    # Make the transcript request
+                    start_time = time.time()
+                    
+                    if languages:
+                        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+                    else:
+                        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+                    
+                    fetch_time = time.time() - start_time
+                    
+                    # Validate transcript data
+                    if not transcript_list:
+                        raise YouTubeTranscriptError(f"Empty transcript returned for video {video_id}")
+                    
+                    # Log successful retrieval with metrics
+                    transcript_length = len(transcript_list)
+                    logger.info(f"Successfully fetched transcript for {video_id} "
+                              f"(length: {transcript_length} segments, "
+                              f"fetch_time: {fetch_time:.2f}s, "
+                              f"proxy: {proxy_str})")
+                    
+                    return transcript_list
+                    
+                except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
+                    # These are expected YouTube API errors, don't retry
+                    logger.warning(f"YouTube API error for {video_id}: {type(e).__name__}: {e}")
+                    raise
+                except TooManyRequests as e:
+                    # Rate limiting error, should be retried with backoff
+                    logger.warning(f"Rate limit hit for {video_id}: {e}")
+                    raise
+                except Exception as e:
+                    # Unexpected error, log details and reraise for retry logic
+                    logger.error(f"Unexpected error fetching transcript for {video_id}: {type(e).__name__}: {e}")
+                    raise
+                    
+                finally:
+                    # Always restore original behavior
+                    self._restore_transcript_api()
+    
+    def list_transcripts(self, video_id: str):
+        """
+        List available transcripts with proxy support.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Transcript list
+        """
+        operation_name = f"transcript_list_{video_id}"
+        
+        with self.retry_manager.retry_context(operation_name):
+            with self.proxy_manager.request_context() as (session, proxy):
+                try:
+                    # Apply proxy to transcript API
+                    self._patch_transcript_api(proxy)
+                    
+                    # Log the request with detailed information
+                    proxy_str = proxy.url if proxy else 'direct'
+                    logger.debug(f"Listing transcripts for {video_id} via {proxy_str}")
+                    
+                    # Make the transcript list request
+                    start_time = time.time()
+                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    list_time = time.time() - start_time
+                    
+                    # Validate response
+                    if transcript_list is None:
+                        raise YouTubeTranscriptError(f"No transcript list returned for video {video_id}")
+                    
+                    # Count available transcripts
+                    transcript_count = len(list(transcript_list))
+                    
+                    # Log successful retrieval with metrics
+                    logger.info(f"Successfully listed transcripts for {video_id} "
+                              f"(found: {transcript_count} transcripts, "
+                              f"list_time: {list_time:.2f}s, "
+                              f"proxy: {proxy_str})")
+                    
+                    return transcript_list
+                    
+                except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
+                    # These are expected YouTube API errors, don't retry
+                    logger.warning(f"YouTube API error listing transcripts for {video_id}: {type(e).__name__}: {e}")
+                    raise
+                except TooManyRequests as e:
+                    # Rate limiting error, should be retried with backoff
+                    logger.warning(f"Rate limit hit listing transcripts for {video_id}: {e}")
+                    raise
+                except Exception as e:
+                    # Unexpected error, log details and reraise for retry logic
+                    logger.error(f"Unexpected error listing transcripts for {video_id}: {type(e).__name__}: {e}")
+                    raise
+                    
+                finally:
+                    # Always restore original behavior
+                    self._restore_transcript_api()
+
+
 class YouTubeTranscriptFetcher:
     """Handles YouTube transcript fetching and processing with comprehensive logging."""
     
     def __init__(self, enable_detailed_logging: bool = True, log_file: str = None):
         self.formatter = TextFormatter()
-        self.api = YouTubeTranscriptApi
+        self.api = ProxyAwareTranscriptApi()  # Use proxy-aware API
         self.metadata_extractor = YouTubeVideoMetadataExtractor()
         self.three_tier_strategy = ThreeTierTranscriptStrategy()
         
