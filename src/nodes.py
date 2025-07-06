@@ -230,6 +230,19 @@ class BaseProcessingNode(Node):
                 'is_recoverable': error_info.is_recoverable
             }
         }
+    
+    def _calculate_duration(self, start_time: str, end_time: str) -> float:
+        """Calculate duration between two ISO timestamps."""
+        try:
+            if not start_time or not end_time:
+                return 0.0
+            
+            start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            end = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+            
+            return (end - start).total_seconds()
+        except Exception:
+            return 0.0
 
 
 class YouTubeTranscriptNode(BaseProcessingNode):
@@ -536,19 +549,6 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             'sentence_count': len([s for s in sentences if s.strip()]),
             'avg_words_per_sentence': len(words) / max(len(sentences), 1)
         }
-    
-    def _calculate_duration(self, start_time: str, end_time: str) -> float:
-        """Calculate duration between two ISO timestamps."""
-        try:
-            if not start_time or not end_time:
-                return 0.0
-            
-            start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-            end = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-            
-            return (end - start).total_seconds()
-        except Exception:
-            return 0.0
 
 
 class SummarizationNode(BaseProcessingNode):
@@ -688,8 +688,8 @@ class SummarizationNode(BaseProcessingNode):
                     )
                 else:
                     # Use standard processing for English/other languages
-                    summary_result = self.smart_llm_client.generate_text(
-                        text=processed_text,
+                    summary_result = self.smart_llm_client.generate_text_with_fallback(
+                        prompt=processed_text,
                         task_requirements=task_requirements,
                         max_tokens=800,
                         temperature=0.3
@@ -925,8 +925,16 @@ class TimestampNode(BaseProcessingNode):
             # Filter and validate transcript entries
             valid_transcript = self._filter_transcript_entries(raw_transcript)
             
-            if len(valid_transcript) < 3:
-                raise ValueError("Insufficient transcript data for meaningful timestamp generation")
+            if len(valid_transcript) == 0:
+                self.logger.warning("No valid transcript entries found, using empty fallback")
+                # Use empty fallback for completely empty transcript
+                timestamp_count = 0
+            elif len(valid_transcript) < 3:
+                self.logger.warning(f"Limited transcript data: only {len(valid_transcript)} entries available for timestamp generation")
+                # Proceed with available data, but adjust timestamp count
+                timestamp_count = min(self.default_timestamp_count, len(valid_transcript))
+            else:
+                timestamp_count = self.default_timestamp_count
             
             prep_result = {
                 'video_id': video_id,
@@ -934,7 +942,7 @@ class TimestampNode(BaseProcessingNode):
                 'video_duration': video_duration,
                 'raw_transcript': valid_transcript,
                 'transcript_count': len(valid_transcript),
-                'timestamp_count': self.default_timestamp_count,
+                'timestamp_count': timestamp_count,
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
             }
@@ -1253,27 +1261,36 @@ Guidelines:
 
 {transcript_text}
 
+IMPORTANT: You must respond with EXACTLY {count} timestamps. Each timestamp must be on a separate line.
+
 For each timestamp, provide:
 1. The timestamp in seconds
 2. A brief description (10-20 words)
 3. Importance rating (1-10)
 
-Format each entry as:
-[XXX.X]s (Rating: X/10) - Description"""
+Format each entry EXACTLY as:
+[XXX.X]s (Rating: X/10) - Description
+
+Example format:
+[10.5]s (Rating: 8/10) - Introduction to main topic
+[45.2]s (Rating: 9/10) - Key insight about the subject
+[120.0]s (Rating: 7/10) - Summary of important points
+
+Do not include any other text or explanations."""
 
         # Generate with smart client using language-appropriate method
         if is_chinese:
             # Use Chinese-optimized processing
             result = self.smart_llm_client.generate_text_with_chinese_optimization(
-                text=transcript_text,
+                text=user_prompt,
                 task_requirements=task_requirements,
                 max_tokens=600,
                 temperature=0.4
             )
         else:
             # Use standard processing for English/other languages
-            result = self.smart_llm_client.generate_text(
-                text=transcript_text,
+            result = self.smart_llm_client.generate_text_with_fallback(
+                prompt=user_prompt,
                 task_requirements=task_requirements,
                 max_tokens=600,
                 temperature=0.4
@@ -1282,6 +1299,11 @@ Format each entry as:
         # Parse the timestamps from the response
         timestamps_text = result['text']
         timestamps = self._parse_timestamps(timestamps_text, video_id)
+        
+        # If no timestamps were parsed, create fallback timestamps
+        if not timestamps:
+            self.logger.warning("No timestamps parsed from LLM response, generating fallback timestamps")
+            timestamps = self._generate_fallback_timestamps(raw_transcript, video_id, count)
         
         return {
             'timestamps': timestamps,
@@ -1326,6 +1348,115 @@ Format each entry as:
             'latest_timestamp': max(timestamp_times),
             'avg_timestamp_length': round(sum(len(t['description'].split()) for t in timestamps) / len(timestamps), 2)
         }
+    
+    def _parse_timestamps(self, timestamps_text: str, video_id: str) -> List[Dict[str, Any]]:
+        """Parse generated timestamps into structured format."""
+        timestamps = []
+        
+        import re
+        
+        # Log the raw response for debugging
+        self.logger.debug(f"Raw timestamps response: {timestamps_text}")
+        
+        for line in timestamps_text.split('\n'):
+            if not line.strip():
+                continue
+            
+            # Try multiple patterns to be more robust
+            patterns = [
+                # Original pattern: [10.5]s (Rating: 8/10) - Description
+                r'\[(\d+(?:\.\d+)?)\]s\s*\(Rating:\s*(\d+)/10\)\s*-\s*(.+)',
+                # Alternative pattern: 10.5s (Rating: 8/10) - Description
+                r'(\d+(?:\.\d+)?)s\s*\(Rating:\s*(\d+)/10\)\s*-\s*(.+)',
+                # Simpler pattern: [10.5]s - Description
+                r'\[(\d+(?:\.\d+)?)\]s\s*-\s*(.+)',
+                # Even simpler: 10.5s - Description
+                r'(\d+(?:\.\d+)?)s\s*-\s*(.+)',
+                # Just timestamp and description: 10.5 - Description
+                r'(\d+(?:\.\d+)?)\s*-\s*(.+)',
+                # Bullet point format: • 10.5s - Description
+                r'[•\-\*]\s*(\d+(?:\.\d+)?)s?\s*-\s*(.+)',
+                # Number format: 1. 10.5s - Description
+                r'\d+\.\s*(\d+(?:\.\d+)?)s?\s*-\s*(.+)',
+            ]
+            
+            matched = False
+            for pattern in patterns:
+                match = re.match(pattern, line.strip())
+                if match:
+                    timestamp_seconds = float(match.group(1))
+                    rating = int(match.group(2)) if len(match.groups()) >= 3 and match.group(2).isdigit() else 5
+                    description = match.group(-1).strip()  # Always the last group
+                    
+                    # Generate YouTube URL with timestamp
+                    youtube_url = f"https://www.youtube.com/watch?v={video_id}&t={int(timestamp_seconds)}s"
+                    
+                    timestamps.append({
+                        'timestamp_seconds': timestamp_seconds,
+                        'timestamp_formatted': self._format_timestamp(timestamp_seconds),
+                        'description': description,
+                        'importance_rating': rating,
+                        'youtube_url': youtube_url
+                    })
+                    matched = True
+                    break
+            
+            if not matched:
+                self.logger.warning(f"Could not parse timestamp line: {line.strip()}")
+        
+        # Sort by timestamp
+        timestamps.sort(key=lambda x: x['timestamp_seconds'])
+        
+        # Log results for debugging
+        self.logger.debug(f"Parsed {len(timestamps)} timestamps from response")
+        
+        return timestamps
+    
+    def _generate_fallback_timestamps(self, raw_transcript: List[Dict[str, Any]], video_id: str, count: int) -> List[Dict[str, Any]]:
+        """Generate fallback timestamps when LLM parsing fails."""
+        timestamps = []
+        
+        if not raw_transcript:
+            return timestamps
+        
+        # Calculate video duration
+        total_duration = sum(segment.get('duration', 0) for segment in raw_transcript)
+        if total_duration == 0:
+            # Fallback: use last segment's end time
+            last_segment = raw_transcript[-1]
+            total_duration = last_segment.get('start', 0) + last_segment.get('duration', 30)
+        
+        # Generate evenly spaced timestamps
+        for i in range(count):
+            timestamp_seconds = (i + 1) * (total_duration / (count + 1))
+            
+            # Find the closest transcript segment
+            closest_segment = min(raw_transcript, key=lambda x: abs(x.get('start', 0) - timestamp_seconds))
+            
+            # Generate YouTube URL with timestamp
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}&t={int(timestamp_seconds)}s"
+            
+            timestamps.append({
+                'timestamp_seconds': timestamp_seconds,
+                'timestamp_formatted': self._format_timestamp(timestamp_seconds),
+                'description': f"Key moment: {closest_segment.get('text', 'Content at this timestamp')[:50]}...",
+                'importance_rating': 5,  # Default rating
+                'youtube_url': youtube_url
+            })
+        
+        return timestamps
+    
+    def _format_timestamp(self, seconds: float) -> str:
+        """Format timestamp in MM:SS or HH:MM:SS format."""
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
 
 
 class KeywordExtractionNode(BaseProcessingNode):
@@ -1653,8 +1784,8 @@ Please provide exactly {count} keywords, one per line, without numbering or bull
             )
         else:
             # Use standard processing for English/other languages
-            result = self.smart_llm_client.generate_text(
-                text=text,
+            result = self.smart_llm_client.generate_text_with_fallback(
+                prompt=text,
                 task_requirements=task_requirements,
                 max_tokens=300,
                 temperature=0.2

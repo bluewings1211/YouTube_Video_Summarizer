@@ -1713,7 +1713,7 @@ class YouTubeSummarizerFlow(Flow):
                     'duration': video_metadata.get('duration_seconds', 0),
                     'summary': summary_data.get('summary_text', ''),
                     'timestamps': timestamp_data.get('timestamps', []),
-                    'keywords': keyword_data.get('keywords', [])
+                    'keywords': [kw['keyword'] if isinstance(kw, dict) else kw for kw in keyword_data.get('keywords', [])]
                 },
                 'metadata': {
                     'processing_time': time.time() - self.metrics.start_time if self.metrics else 0,

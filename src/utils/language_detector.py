@@ -165,7 +165,11 @@ class YouTubeLanguageDetector:
                     language_scores[lang] += score * 0.3  # Description has lower importance
             
             # Determine best match
-            best_language = max(language_scores.items(), key=lambda x: x[1])
+            # If no language has a score, default to UNKNOWN
+            if not any(language_scores.values()):
+                best_language = (LanguageCode.UNKNOWN, 0.1)
+            else:
+                best_language = max(language_scores.items(), key=lambda x: x[1])
             detected_language, confidence = best_language
             
             # Normalize confidence score
@@ -198,8 +202,15 @@ class YouTubeLanguageDetector:
             return result
             
         except Exception as e:
-            self.logger.error(f"Metadata language detection failed: {str(e)}")
-            raise LanguageDetectionError(f"Metadata analysis failed: {str(e)}", detection_method="metadata_analysis")
+            # Handle enum values that might be raised as exceptions
+            error_msg = str(e)
+            if isinstance(e, LanguageCode):
+                error_msg = e.value
+            elif hasattr(e, 'value'):
+                error_msg = getattr(e, 'value', str(e))
+            
+            self.logger.error(f"Metadata language detection failed: {error_msg}")
+            raise LanguageDetectionError(f"Metadata analysis failed: {error_msg}", detection_method="metadata_analysis")
     
     def detect_language_from_transcript(self, transcript_text: str) -> LanguageDetectionResult:
         """
@@ -224,7 +235,10 @@ class YouTubeLanguageDetector:
             language_scores = self._analyze_text_content(transcript_text)
             
             # Determine best match
-            best_language = max(language_scores.items(), key=lambda x: x[1])
+            if not any(language_scores.values()):
+                best_language = (LanguageCode.UNKNOWN, 0.1)
+            else:
+                best_language = max(language_scores.items(), key=lambda x: x[1])
             detected_language, confidence = best_language
             
             # Create alternative languages list
@@ -251,8 +265,15 @@ class YouTubeLanguageDetector:
             return result
             
         except Exception as e:
-            self.logger.error(f"Transcript language detection failed: {str(e)}")
-            raise LanguageDetectionError(f"Transcript analysis failed: {str(e)}", detection_method="transcript_analysis")
+            # Handle enum values that might be raised as exceptions
+            error_msg = str(e)
+            if isinstance(e, LanguageCode):
+                error_msg = e.value
+            elif hasattr(e, 'value'):
+                error_msg = getattr(e, 'value', str(e))
+            
+            self.logger.error(f"Transcript language detection failed: {error_msg}")
+            raise LanguageDetectionError(f"Transcript analysis failed: {error_msg}", detection_method="transcript_analysis")
     
     def detect_language_comprehensive(
         self, 
@@ -321,8 +342,15 @@ class YouTubeLanguageDetector:
                 return metadata_result
                 
         except Exception as e:
-            self.logger.error(f"Comprehensive language detection failed: {str(e)}")
-            raise LanguageDetectionError(f"Comprehensive analysis failed: {str(e)}", detection_method="comprehensive_analysis")
+            # Handle enum values that might be raised as exceptions
+            error_msg = str(e)
+            if isinstance(e, LanguageCode):
+                error_msg = e.value
+            elif hasattr(e, 'value'):
+                error_msg = getattr(e, 'value', str(e))
+            
+            self.logger.error(f"Comprehensive language detection failed: {error_msg}")
+            raise LanguageDetectionError(f"Comprehensive analysis failed: {error_msg}", detection_method="comprehensive_analysis")
     
     def is_chinese_content(self, detection_result: LanguageDetectionResult) -> bool:
         """
@@ -404,9 +432,9 @@ class YouTubeLanguageDetector:
         
         # Other languages
         elif lang_lower in ['ja', 'ja-jp', 'japanese']:
-            scores[LanguageCode.JAPANESE] = weight * 0.1  # Lower weight for non-target languages
+            scores[LanguageCode.JAPANESE] = weight  # Full weight for Japanese detection
         elif lang_lower in ['ko', 'ko-kr', 'korean']:
-            scores[LanguageCode.KOREAN] = weight * 0.1
+            scores[LanguageCode.KOREAN] = weight  # Full weight for Korean detection
         
         return scores
     

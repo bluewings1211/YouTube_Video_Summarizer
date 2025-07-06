@@ -96,4 +96,3 @@ prometheus-client>=0.19.0
 statsd>=4.0.1
 
 # Additional Security
-secrets>=0.3.0  # Part of Python standard library but listed for clarity

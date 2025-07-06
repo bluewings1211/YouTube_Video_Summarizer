@@ -19,20 +19,19 @@ MODEL_SELECTION_STRATEGY=prefer_local
 
 # Ollama Configuration - Development settings
 OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=llama3.2:3b  # Lightweight model for development
+OLLAMA_MODEL=my-qwen3:8b_ctx20K_pre1k
 OLLAMA_AUTO_PULL=true
 OLLAMA_MODEL_CACHE_SIZE=3
 OLLAMA_GPU_MEMORY_FRACTION=0.5
 OLLAMA_CONTEXT_SIZE=2048
 
 # Model Selection - Optimized for development
-LIGHTWEIGHT_MODEL=llama3.2:3b
-PERFORMANCE_MODEL=mistral:7b
-CHINESE_LANGUAGE_MODEL=qwen2.5:7b
+LIGHTWEIGHT_MODEL=my-qwen3:8b_ctx20K_pre1k
+PERFORMANCE_MODEL=my-qwen3:8b_ctx20K_pre1k
+CHINESE_LANGUAGE_MODEL=my-qwen3:8b_ctx20K_pre1k
 
 # Proxy Configuration - Disabled for development
-PROXY_ENABLED=true
-PROXY_URLS=http://your-proxy-url:port
+PROXY_ENABLED=false
 
 # Security Configuration - Relaxed for development
 SECRET_KEY=dev-secret-key-not-for-production
@@ -66,7 +65,7 @@ API_RATE_LIMIT=1000
 
 # YouTube API - Standard timeouts
 YOUTUBE_API_TIMEOUT=30
-MAX_VIDEO_DURATION=900  # 15 minutes for development
+MAX_VIDEO_DURATION=900
 
 # Retry Configuration - Fewer retries for faster feedback
 RETRY_MAX_ATTEMPTS=2

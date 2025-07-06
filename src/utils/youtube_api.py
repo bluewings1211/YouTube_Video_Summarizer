@@ -1757,8 +1757,13 @@ class YouTubeTranscriptFetcher:
         try:
             # Get the last transcript entry
             last_entry = transcript_list[-1]
-            return last_entry.get('start', 0.0) + last_entry.get('duration', 0.0)
-        except (IndexError, KeyError):
+            
+            # Handle both dict and object access
+            start_time = getattr(last_entry, 'start', last_entry.get('start', 0.0))
+            duration = getattr(last_entry, 'duration', last_entry.get('duration', 0.0))
+            
+            return start_time + duration
+        except (IndexError, KeyError, AttributeError):
             return 0.0
     
     def _detect_language(self, transcript_list: List[Dict[str, Any]]) -> str:
@@ -1776,8 +1781,12 @@ class YouTubeTranscriptFetcher:
         if not transcript_list:
             return 'unknown'
             
+        # Handle both dict and object access
+        def get_text(entry):
+            return getattr(entry, 'text', entry.get('text', ''))
+            
         # Check for English patterns
-        text_sample = ' '.join([entry.get('text', '') for entry in transcript_list[:10]])
+        text_sample = ' '.join([get_text(entry) for entry in transcript_list[:10]])
         
         # Simple heuristic for English detection
         english_indicators = ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that', 'it', 'with']
@@ -1884,18 +1893,30 @@ class YouTubeTranscriptFetcher:
                 if self.acquisition_logger:
                     self.acquisition_logger.log_video_metadata(video_id, None)
         
-        # Enhance language preferences with detection if available
-        enhanced_preferred_languages = preferred_languages
-        if video_metadata and not preferred_languages:
+        # Always detect language from metadata to create a base set of preferred languages.
+        detected_languages = []
+        if video_metadata:
             try:
-                # Perform language detection on metadata to get preferred transcript languages
                 from .language_detector import get_preferred_transcript_languages
-                enhanced_preferred_languages = get_preferred_transcript_languages(video_metadata)
-                logger.info(f"Enhanced language preferences from detection: {enhanced_preferred_languages}")
+                detected_languages = get_preferred_transcript_languages(video_metadata)
+                logger.info(f"Detected preferred languages from metadata: {detected_languages}")
             except ImportError:
-                logger.debug("Language detector not available, using default language preferences")
+                logger.debug("Language detector not available, using default language preferences.")
             except Exception as e:
-                logger.warning(f"Language detection failed, using default preferences: {str(e)}")
+                logger.warning(f"Language detection from metadata failed, using default preferences: {str(e)}")
+
+        # Combine detected languages with user-provided preferred languages, giving priority to detected ones.
+        enhanced_preferred_languages = list(detected_languages) # Create a copy
+        if preferred_languages:
+            for lang in preferred_languages:
+                if lang not in enhanced_preferred_languages:
+                    enhanced_preferred_languages.append(lang)
+        
+        # If no languages are detected or provided, use a default list.
+        if not enhanced_preferred_languages:
+            enhanced_preferred_languages = ['en', 'zh-TW', 'zh-CN', 'zh', 'ja', 'ko']
+        
+        logger.info(f"Final language preference order for transcript search: {enhanced_preferred_languages}")
         
         # Build three-tier strategy with enhanced language preferences
         try:
@@ -1922,7 +1943,7 @@ class YouTubeTranscriptFetcher:
         try:
             if enable_intelligent_fallback:
                 result = self._execute_intelligent_fallback_strategy(
-                    video_id, strategy_order, video_metadata, preferred_languages, 
+                    video_id, strategy_order, video_metadata, preferred_languages,
                     max_tier_attempts, fallback_retry_delay
                 )
             else:
@@ -2872,7 +2893,7 @@ def fetch_youtube_transcript_with_three_tier_strategy(
     max_duration_seconds: int = 1800,
     max_tier_attempts: int = 3,
     enable_intelligent_fallback: bool = True,
-    fallback_retry_delay: float = 1.0
+    fallback_retry_delay: float = 15.0
 ) -> Dict[str, Any]:
     """
     Convenience function to fetch YouTube transcript using three-tier strategy with intelligent fallback.

@@ -207,16 +207,33 @@ class LLMClient:
         """Initialize Ollama client."""
         if not OLLAMA_AVAILABLE:
             raise LLMClientError("Ollama library not installed. Install with: pip install ollama")
-        
+
         # Set up Ollama client with host configuration
         self.client = ollama.Client(host=self.config.ollama_host)
-        
+
         # Test connection and verify model availability
         try:
             # Check if Ollama server is running
             models = self.client.list()
-            available_models = [model['name'] for model in models.get('models', [])]
-            
+            self.logger.debug(f"Ollama models response: {models}")
+
+            available_models = []
+            model_list = models.get('models', [])
+            for model_info in model_list:
+                name = None
+                if isinstance(model_info, dict):
+                    name = model_info.get('name')
+                else:
+                    # Try to get name from model attribute, fallback to model
+                    name = getattr(model_info, 'name', None)
+                    if not name:
+                        name = getattr(model_info, 'model', None)
+                
+                if name:
+                    available_models.append(name)
+                else:
+                    self.logger.debug(f"Skipping model entry without name: {model_info}")
+
             # Check if the requested model is available
             if self.config.model not in available_models:
                 # Try to find partial matches (e.g., llama3.1:8b matches llama3.1)
@@ -226,15 +243,16 @@ class LLMClient:
                         f"Model '{self.config.model}' not found. Available models: {available_models}"
                     )
                     raise OllamaModelNotFoundError(self.config.model)
-            
+
             self.logger.info(f"Ollama client initialized with model: {self.config.model} at {self.config.ollama_host}")
-            
+
         except Exception as e:
             if "connection" in str(e).lower() or "refused" in str(e).lower():
                 raise OllamaConnectionError(self.config.ollama_host)
             elif "not found" in str(e).lower():
                 raise OllamaModelNotFoundError(self.config.model)
             else:
+                self.logger.error(f"Full error when initializing Ollama client: {e}", exc_info=True)
                 raise LLMClientError(f"Failed to initialize Ollama client: {str(e)}")
     
     def generate_text(
@@ -789,7 +807,17 @@ def check_ollama_availability(host: str = "http://localhost:11434") -> Dict[str,
     try:
         client = ollama.Client(host=host)
         models_response = client.list()
-        available_models = [model['name'] for model in models_response.get('models', [])]
+        model_list = models_response.get('models', [])
+        available_models = []
+        for model_info in model_list:
+            name = None
+            if isinstance(model_info, dict):
+                name = model_info.get('name')
+            else:
+                name = getattr(model_info, 'name', None)
+            
+            if name:
+                available_models.append(name)
         
         return {
             'available': True,
