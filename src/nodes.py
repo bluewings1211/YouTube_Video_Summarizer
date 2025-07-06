@@ -50,6 +50,7 @@ except ImportError:
 from src.utils.youtube_api import YouTubeTranscriptFetcher, YouTubeTranscriptError
 from src.utils.validators import YouTubeURLValidator
 from src.utils.call_llm import create_llm_client, LLMError
+from src.utils.smart_llm_client import SmartLLMClient, TaskRequirements, detect_task_requirements
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -112,7 +113,8 @@ class BaseProcessingNode(Node):
         )
         from .utils.call_llm import (
             LLMRateLimitError, LLMTimeoutError, LLMServerError, 
-            LLMAuthenticationError, LLMQuotaError
+            LLMAuthenticationError, LLMQuotaError, OllamaConnectionError,
+            OllamaModelNotFoundError, OllamaInsufficientResourcesError
         )
         
         # Non-recoverable errors
@@ -123,6 +125,8 @@ class BaseProcessingNode(Node):
             VideoTooLongError,
             LLMAuthenticationError,
             LLMQuotaError,
+            OllamaModelNotFoundError,  # Model not found requires manual intervention
+            OllamaInsufficientResourcesError,  # Resource issues require system changes
             ValueError,  # Usually validation errors
             TypeError,   # Usually programming errors
         )
@@ -137,6 +141,7 @@ class BaseProcessingNode(Node):
             LLMRateLimitError,
             LLMTimeoutError,
             LLMServerError,
+            OllamaConnectionError,  # Connection issues may be temporary
             ConnectionError,
             TimeoutError,
         )
@@ -225,6 +230,19 @@ class BaseProcessingNode(Node):
                 'is_recoverable': error_info.is_recoverable
             }
         }
+    
+    def _calculate_duration(self, start_time: str, end_time: str) -> float:
+        """Calculate duration between two ISO timestamps."""
+        try:
+            if not start_time or not end_time:
+                return 0.0
+            
+            start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            end = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+            
+            return (end - start).total_seconds()
+        except Exception:
+            return 0.0
 
 
 class YouTubeTranscriptNode(BaseProcessingNode):
@@ -235,9 +253,13 @@ class YouTubeTranscriptNode(BaseProcessingNode):
     including video validation, metadata extraction, and error handling.
     """
     
-    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0):
+    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0, 
+                 enable_enhanced_acquisition: bool = True, enable_detailed_logging: bool = True):
         super().__init__("YouTubeTranscriptNode", max_retries, retry_delay)
-        self.transcript_fetcher = YouTubeTranscriptFetcher()
+        self.transcript_fetcher = YouTubeTranscriptFetcher(
+            enable_detailed_logging=enable_detailed_logging
+        )
+        self.enable_enhanced_acquisition = enable_enhanced_acquisition
     
     def prep(self, store: Store) -> Dict[str, Any]:
         """
@@ -332,14 +354,51 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Fetch transcript with metadata
-                transcript_data = self.transcript_fetcher.fetch_transcript(
-                    video_id=video_id,
-                    languages=['en'],
-                    include_metadata=True,
-                    check_unsupported=False,
-                    max_duration_seconds=1800
-                )
+                # Get language preferences from store
+                preferred_languages = None
+                
+                # First, check if we have language detection results (from previous execution)
+                language_detection_result = store.get('language_detection_result', {})
+                if language_detection_result and language_detection_result.get('detected_language'):
+                    try:
+                        # Import here to avoid circular dependencies
+                        from src.utils.language_detector import get_preferred_transcript_languages
+                        
+                        # Create metadata dict for language preference detection
+                        video_metadata = {'language': language_detection_result['detected_language']}
+                        preferred_languages = get_preferred_transcript_languages(video_metadata)
+                        self.logger.debug(f"Using detected language preferences: {preferred_languages}")
+                    except Exception as e:
+                        self.logger.debug(f"Could not determine language preferences: {str(e)}")
+                
+                # Fallback to default language preferences if available
+                if not preferred_languages:
+                    preferred_languages = store.get('default_language_preferences')
+                    if preferred_languages:
+                        self.logger.debug(f"Using default language preferences: {preferred_languages}")
+                
+                # Choose acquisition method based on configuration
+                if self.enable_enhanced_acquisition:
+                    # Use enhanced three-tier strategy with intelligent fallback
+                    transcript_data = self.transcript_fetcher.fetch_transcript_with_three_tier_strategy(
+                        video_id=video_id,
+                        preferred_languages=preferred_languages,  # Use language detection preferences
+                        include_metadata=True,
+                        check_unsupported=False,  # Already checked in prep phase
+                        max_duration_seconds=1800,
+                        max_tier_attempts=3,
+                        enable_intelligent_fallback=True,
+                        fallback_retry_delay=1.0
+                    )
+                else:
+                    # Fallback to basic transcript acquisition
+                    transcript_data = self.transcript_fetcher.fetch_transcript(
+                        video_id=video_id,
+                        languages=['en'],
+                        include_metadata=True,
+                        check_unsupported=False,
+                        max_duration_seconds=1800
+                    )
                 
                 exec_result = {
                     'exec_status': 'success',
@@ -351,7 +410,9 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                     'transcript_word_count': transcript_data['word_count'],
                     'video_metadata': transcript_data.get('video_metadata', {}),
                     'exec_timestamp': datetime.utcnow().isoformat(),
-                    'retry_count': retry_count
+                    'retry_count': retry_count,
+                    'acquisition_method': 'enhanced_three_tier' if self.enable_enhanced_acquisition else 'basic',
+                    'three_tier_metadata': transcript_data.get('three_tier_metadata', {}) if self.enable_enhanced_acquisition else None
                 }
                 
                 self.logger.info(f"Transcript execution successful for video {video_id}")
@@ -399,7 +460,7 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             # Calculate additional metrics
             transcript_stats = self._calculate_transcript_stats(transcript_text)
             
-            # Prepare store data
+            # Prepare store data with enhanced metadata
             store_data = {
                 'transcript_data': {
                     'video_id': video_id,
@@ -408,7 +469,8 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                     'language': exec_result['transcript_language'],
                     'duration_seconds': exec_result['transcript_duration'],
                     'word_count': exec_result['transcript_word_count'],
-                    'stats': transcript_stats
+                    'stats': transcript_stats,
+                    'acquisition_method': exec_result.get('acquisition_method', 'unknown')
                 },
                 'video_metadata': video_metadata,
                 'processing_metadata': {
@@ -417,9 +479,25 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                         prep_result.get('prep_timestamp', ''),
                         exec_result.get('exec_timestamp', '')
                     ),
-                    'retry_count': exec_result.get('retry_count', 0)
+                    'retry_count': exec_result.get('retry_count', 0),
+                    'acquisition_method': exec_result.get('acquisition_method', 'unknown')
                 }
             }
+            
+            # Add three-tier metadata if available
+            three_tier_metadata = exec_result.get('three_tier_metadata')
+            if three_tier_metadata:
+                store_data['three_tier_acquisition'] = {
+                    'selected_tier': three_tier_metadata.get('selected_tier'),
+                    'selected_language': three_tier_metadata.get('selected_language'),
+                    'quality_score': three_tier_metadata.get('quality_score'),
+                    'total_attempts': three_tier_metadata.get('total_attempts', 0),
+                    'strategy_options': three_tier_metadata.get('strategy_options', 0),
+                    'tier_summary': three_tier_metadata.get('tier_summary', {}),
+                    'intelligent_fallback_used': three_tier_metadata.get('intelligent_fallback_metadata', {}).get('fallback_enabled', False),
+                    'tiers_tried': three_tier_metadata.get('intelligent_fallback_metadata', {}).get('tiers_tried', []),
+                    'attempts_made': three_tier_metadata.get('attempts_made', [])
+                }
             
             # Update store
             self._safe_store_update(store, store_data)
@@ -431,8 +509,20 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                 'transcript_length': len(transcript_text),
                 'video_title': video_metadata.get('title', 'Unknown'),
                 'video_duration': video_metadata.get('duration_seconds', 0),
+                'transcript_language': exec_result['transcript_language'],
+                'acquisition_method': exec_result.get('acquisition_method', 'unknown'),
                 'post_timestamp': datetime.utcnow().isoformat()
             }
+            
+            # Add three-tier specific information to post result
+            if three_tier_metadata:
+                post_result.update({
+                    'selected_tier': three_tier_metadata.get('selected_tier'),
+                    'quality_score': three_tier_metadata.get('quality_score'),
+                    'total_attempts': three_tier_metadata.get('total_attempts', 0),
+                    'intelligent_fallback_used': three_tier_metadata.get('intelligent_fallback_metadata', {}).get('fallback_enabled', False),
+                    'tiers_available': len(three_tier_metadata.get('tier_summary', {}).get('tiers', {}))
+                })
             
             self.logger.info(f"Transcript post-processing successful for video {video_id}")
             return post_result
@@ -459,19 +549,6 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             'sentence_count': len([s for s in sentences if s.strip()]),
             'avg_words_per_sentence': len(words) / max(len(sentences), 1)
         }
-    
-    def _calculate_duration(self, start_time: str, end_time: str) -> float:
-        """Calculate duration between two ISO timestamps."""
-        try:
-            if not start_time or not end_time:
-                return 0.0
-            
-            start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-            end = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-            
-            return (end - start).total_seconds()
-        except Exception:
-            return 0.0
 
 
 class SummarizationNode(BaseProcessingNode):
@@ -484,7 +561,7 @@ class SummarizationNode(BaseProcessingNode):
     
     def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
         super().__init__("SummarizationNode", max_retries, retry_delay)
-        self.llm_client = None
+        self.smart_llm_client = None
         self.target_word_count = 500
     
     def prep(self, store: Store) -> Dict[str, Any]:
@@ -516,21 +593,11 @@ class SummarizationNode(BaseProcessingNode):
             if word_count < 50:
                 raise ValueError(f"Transcript too short for summarization ({word_count} words)")
             
-            # Initialize LLM client
+            # Initialize Smart LLM client
             try:
-                # Try OpenAI first, fall back to environment detection
-                provider = os.getenv('LLM_PROVIDER', 'openai')
-                model = os.getenv('LLM_MODEL', 'gpt-3.5-turbo')
-                
-                self.llm_client = create_llm_client(
-                    provider=provider,
-                    model=model,
-                    max_tokens=800,  # Allow extra tokens for 500-word summary
-                    temperature=0.3  # Lower temperature for consistent summaries
-                )
-                
+                self.smart_llm_client = SmartLLMClient()
             except Exception as e:
-                raise ValueError(f"Failed to initialize LLM client: {str(e)}")
+                raise ValueError(f"Failed to initialize Smart LLM client: {str(e)}")
             
             prep_result = {
                 'transcript_text': transcript_text,
@@ -538,8 +605,6 @@ class SummarizationNode(BaseProcessingNode):
                 'target_word_count': self.target_word_count,
                 'video_id': transcript_data.get('video_id', 'unknown'),
                 'video_title': store.get('video_metadata', {}).get('title', 'Unknown'),
-                'llm_provider': provider,
-                'llm_model': model,
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
             }
@@ -584,16 +649,55 @@ class SummarizationNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Generate summary with context
-                summary_result = self.llm_client.summarize_text(
-                    text=transcript_text,
-                    target_length=target_word_count,
-                    style="professional"
+                # Get language detection results for language-specific processing
+                language_detection_result = store.get('language_detection_result', {})
+                detected_language = language_detection_result.get('detected_language', 'en')
+                is_chinese = language_detection_result.get('is_chinese', False)
+                
+                # Apply language-specific text preprocessing if needed
+                processed_text = transcript_text
+                if is_chinese:
+                    try:
+                        # Import here to avoid circular dependencies
+                        from src.utils.language_detector import ensure_chinese_encoding
+                        processed_text = ensure_chinese_encoding(transcript_text)
+                        self.logger.debug("Applied Chinese encoding preservation")
+                    except Exception as e:
+                        self.logger.debug(f"Could not apply Chinese encoding: {str(e)}")
+                
+                # Create task requirements for smart model selection
+                task_requirements = detect_task_requirements(
+                    text=processed_text,
+                    task_type="summarization",
+                    quality_level="medium"
                 )
                 
-                # Validate summary quality
-                summary_text = summary_result['summary']
-                summary_word_count = summary_result['word_count']
+                # Add language information to task requirements
+                if detected_language:
+                    task_requirements.language = detected_language
+                    task_requirements.is_chinese = is_chinese
+                
+                # Generate summary with smart client and language-aware optimization
+                if is_chinese:
+                    # Use Chinese-optimized processing
+                    summary_result = self.smart_llm_client.generate_text_with_chinese_optimization(
+                        text=processed_text,
+                        task_requirements=task_requirements,
+                        max_tokens=800,  # Allow extra tokens for 500-word summary
+                        temperature=0.3  # Lower temperature for consistent summaries
+                    )
+                else:
+                    # Use standard processing for English/other languages
+                    summary_result = self.smart_llm_client.generate_text_with_fallback(
+                        prompt=processed_text,
+                        task_requirements=task_requirements,
+                        max_tokens=800,
+                        temperature=0.3
+                    )
+                
+                # Extract and validate summary text
+                summary_text = summary_result['text']
+                summary_word_count = len(summary_text.split())
                 
                 if not summary_text or summary_word_count < 50:
                     raise ValueError(f"Generated summary too short ({summary_word_count} words)")
@@ -605,17 +709,20 @@ class SummarizationNode(BaseProcessingNode):
                     target_word_count
                 )
                 
+                # Calculate compression ratio
+                compression_ratio = prep_result['original_word_count'] / max(summary_word_count, 1)
+                
                 exec_result = {
                     'exec_status': 'success',
                     'summary_text': summary_text,
                     'summary_word_count': summary_word_count,
                     'target_word_count': target_word_count,
                     'original_word_count': prep_result['original_word_count'],
-                    'compression_ratio': summary_result['compression_ratio'],
+                    'compression_ratio': compression_ratio,
                     'summary_stats': summary_stats,
                     'video_id': prep_result['video_id'],
                     'video_title': video_title,
-                    'llm_metadata': summary_result['generation_metadata'],
+                    'llm_metadata': summary_result,
                     'exec_timestamp': datetime.utcnow().isoformat(),
                     'retry_count': retry_count
                 }
@@ -663,6 +770,19 @@ class SummarizationNode(BaseProcessingNode):
             video_id = exec_result['video_id']
             video_title = exec_result['video_title']
             
+            # Apply language-specific post-processing
+            language_detection_result = store.get('language_detection_result', {})
+            is_chinese = language_detection_result.get('is_chinese', False)
+            
+            # Ensure Chinese content encoding is preserved
+            if is_chinese and summary_text:
+                try:
+                    from src.utils.language_detector import ensure_chinese_encoding
+                    summary_text = ensure_chinese_encoding(summary_text)
+                    self.logger.debug("Applied Chinese encoding preservation to summary")
+                except Exception as e:
+                    self.logger.debug(f"Could not apply Chinese encoding to summary: {str(e)}")
+            
             # Prepare store data
             store_data = {
                 'summary_data': {
@@ -682,8 +802,8 @@ class SummarizationNode(BaseProcessingNode):
                         exec_result.get('exec_timestamp', '')
                     ),
                     'retry_count': exec_result.get('retry_count', 0),
-                    'llm_provider': prep_result.get('llm_provider', 'unknown'),
-                    'llm_model': prep_result.get('llm_model', 'unknown')
+                    'llm_provider': exec_result.get('llm_metadata', {}).get('provider', 'unknown'),
+                    'llm_model': exec_result.get('llm_metadata', {}).get('model', 'unknown')
                 }
             }
             
@@ -754,7 +874,7 @@ class TimestampNode(BaseProcessingNode):
     
     def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
         super().__init__("TimestampNode", max_retries, retry_delay)
-        self.llm_client = None
+        self.smart_llm_client = None
         self.default_timestamp_count = 5
     
     def prep(self, store: Store) -> Dict[str, Any]:
@@ -796,26 +916,25 @@ class TimestampNode(BaseProcessingNode):
             if video_duration <= 0:
                 self.logger.warning("Video duration not available, proceeding anyway")
             
-            # Initialize LLM client
+            # Initialize Smart LLM client
             try:
-                provider = os.getenv('LLM_PROVIDER', 'openai')
-                model = os.getenv('LLM_MODEL', 'gpt-3.5-turbo')
-                
-                self.llm_client = create_llm_client(
-                    provider=provider,
-                    model=model,
-                    max_tokens=600,  # Sufficient for timestamp descriptions
-                    temperature=0.4  # Balanced creativity for descriptions
-                )
-                
+                self.smart_llm_client = SmartLLMClient()
             except Exception as e:
-                raise ValueError(f"Failed to initialize LLM client: {str(e)}")
+                raise ValueError(f"Failed to initialize Smart LLM client: {str(e)}")
             
             # Filter and validate transcript entries
             valid_transcript = self._filter_transcript_entries(raw_transcript)
             
-            if len(valid_transcript) < 3:
-                raise ValueError("Insufficient transcript data for meaningful timestamp generation")
+            if len(valid_transcript) == 0:
+                self.logger.warning("No valid transcript entries found, using empty fallback")
+                # Use empty fallback for completely empty transcript
+                timestamp_count = 0
+            elif len(valid_transcript) < 3:
+                self.logger.warning(f"Limited transcript data: only {len(valid_transcript)} entries available for timestamp generation")
+                # Proceed with available data, but adjust timestamp count
+                timestamp_count = min(self.default_timestamp_count, len(valid_transcript))
+            else:
+                timestamp_count = self.default_timestamp_count
             
             prep_result = {
                 'video_id': video_id,
@@ -823,9 +942,7 @@ class TimestampNode(BaseProcessingNode):
                 'video_duration': video_duration,
                 'raw_transcript': valid_transcript,
                 'transcript_count': len(valid_transcript),
-                'timestamp_count': self.default_timestamp_count,
-                'llm_provider': provider,
-                'llm_model': model,
+                'timestamp_count': timestamp_count,
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
             }
@@ -871,11 +988,31 @@ class TimestampNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Generate timestamps using LLM
-                timestamps_result = self.llm_client.generate_timestamps(
-                    transcript_data=raw_transcript,
-                    video_id=video_id,
-                    count=timestamp_count
+                # Get language detection results for language-specific processing
+                language_detection_result = store.get('language_detection_result', {})
+                detected_language = language_detection_result.get('detected_language', 'en')
+                is_chinese = language_detection_result.get('is_chinese', False)
+                
+                # Create task requirements for smart model selection
+                transcript_text = self._format_transcript_for_analysis(raw_transcript)
+                task_requirements = detect_task_requirements(
+                    text=transcript_text,
+                    task_type="timestamps",
+                    quality_level="medium"
+                )
+                
+                # Add language information to task requirements
+                if detected_language:
+                    task_requirements.language = detected_language
+                    task_requirements.is_chinese = is_chinese
+                
+                # Generate timestamps using smart client with language awareness
+                timestamps_result = self._generate_timestamps_with_smart_client(
+                    raw_transcript,
+                    video_id,
+                    timestamp_count,
+                    task_requirements,
+                    is_chinese=is_chinese
                 )
                 
                 # Validate generated timestamps
@@ -987,8 +1124,8 @@ class TimestampNode(BaseProcessingNode):
                         exec_result.get('exec_timestamp', '')
                     ),
                     'retry_count': exec_result.get('retry_count', 0),
-                    'llm_provider': prep_result.get('llm_provider', 'unknown'),
-                    'llm_model': prep_result.get('llm_model', 'unknown')
+                    'llm_provider': exec_result.get('llm_metadata', {}).get('provider', 'unknown'),
+                    'llm_model': exec_result.get('llm_metadata', {}).get('model', 'unknown')
                 }
             }
             
@@ -1089,6 +1226,93 @@ class TimestampNode(BaseProcessingNode):
         
         return enhanced
     
+    def _format_transcript_for_analysis(self, raw_transcript: List[Dict[str, Any]]) -> str:
+        """Format transcript data for text analysis."""
+        transcript_text = ""
+        for i, entry in enumerate(raw_transcript[:50]):  # Use first 50 entries
+            start_time = entry.get('start', 0)
+            text = entry.get('text', '')
+            transcript_text += f"[{start_time:.1f}s] {text}\n"
+        return transcript_text
+    
+    def _generate_timestamps_with_smart_client(
+        self, 
+        raw_transcript: List[Dict[str, Any]], 
+        video_id: str, 
+        count: int,
+        task_requirements: TaskRequirements,
+        is_chinese: bool = False
+    ) -> Dict[str, Any]:
+        """Generate timestamps using the smart LLM client."""
+        # Format transcript for processing
+        transcript_text = self._format_transcript_for_analysis(raw_transcript)
+        
+        # Create timestamp prompt
+        system_prompt = f"""You are an expert at identifying the most important moments in video content. Analyze the provided transcript and identify the {count} most significant timestamps.
+
+Guidelines:
+- Focus on key insights, important announcements, or turning points
+- Include a brief description of what happens at each timestamp
+- Rate the importance on a scale of 1-10
+- Provide timestamps in the format: [timestamp]s
+- Choose moments that viewers would want to jump to directly"""
+
+        user_prompt = f"""Analyze this transcript and identify the {count} most important timestamps:
+
+{transcript_text}
+
+IMPORTANT: You must respond with EXACTLY {count} timestamps. Each timestamp must be on a separate line.
+
+For each timestamp, provide:
+1. The timestamp in seconds
+2. A brief description (10-20 words)
+3. Importance rating (1-10)
+
+Format each entry EXACTLY as:
+[XXX.X]s (Rating: X/10) - Description
+
+Example format:
+[10.5]s (Rating: 8/10) - Introduction to main topic
+[45.2]s (Rating: 9/10) - Key insight about the subject
+[120.0]s (Rating: 7/10) - Summary of important points
+
+Do not include any other text or explanations."""
+
+        # Generate with smart client using language-appropriate method
+        if is_chinese:
+            # Use Chinese-optimized processing
+            result = self.smart_llm_client.generate_text_with_chinese_optimization(
+                text=user_prompt,
+                task_requirements=task_requirements,
+                max_tokens=600,
+                temperature=0.4
+            )
+        else:
+            # Use standard processing for English/other languages
+            result = self.smart_llm_client.generate_text_with_fallback(
+                prompt=user_prompt,
+                task_requirements=task_requirements,
+                max_tokens=600,
+                temperature=0.4
+            )
+        
+        # Parse the timestamps from the response
+        timestamps_text = result['text']
+        timestamps = self._parse_timestamps(timestamps_text, video_id)
+        
+        # If no timestamps were parsed, create fallback timestamps
+        if not timestamps:
+            self.logger.warning("No timestamps parsed from LLM response, generating fallback timestamps")
+            timestamps = self._generate_fallback_timestamps(raw_transcript, video_id, count)
+        
+        return {
+            'timestamps': timestamps,
+            'count': len(timestamps),
+            'requested_count': count,
+            'video_id': video_id,
+            'generation_metadata': result
+        }
+    
     def _calculate_timestamp_stats(
         self, 
         timestamps: List[Dict[str, Any]], 
@@ -1124,6 +1348,115 @@ class TimestampNode(BaseProcessingNode):
             'latest_timestamp': max(timestamp_times),
             'avg_timestamp_length': round(sum(len(t['description'].split()) for t in timestamps) / len(timestamps), 2)
         }
+    
+    def _parse_timestamps(self, timestamps_text: str, video_id: str) -> List[Dict[str, Any]]:
+        """Parse generated timestamps into structured format."""
+        timestamps = []
+        
+        import re
+        
+        # Log the raw response for debugging
+        self.logger.debug(f"Raw timestamps response: {timestamps_text}")
+        
+        for line in timestamps_text.split('\n'):
+            if not line.strip():
+                continue
+            
+            # Try multiple patterns to be more robust
+            patterns = [
+                # Original pattern: [10.5]s (Rating: 8/10) - Description
+                r'\[(\d+(?:\.\d+)?)\]s\s*\(Rating:\s*(\d+)/10\)\s*-\s*(.+)',
+                # Alternative pattern: 10.5s (Rating: 8/10) - Description
+                r'(\d+(?:\.\d+)?)s\s*\(Rating:\s*(\d+)/10\)\s*-\s*(.+)',
+                # Simpler pattern: [10.5]s - Description
+                r'\[(\d+(?:\.\d+)?)\]s\s*-\s*(.+)',
+                # Even simpler: 10.5s - Description
+                r'(\d+(?:\.\d+)?)s\s*-\s*(.+)',
+                # Just timestamp and description: 10.5 - Description
+                r'(\d+(?:\.\d+)?)\s*-\s*(.+)',
+                # Bullet point format: • 10.5s - Description
+                r'[•\-\*]\s*(\d+(?:\.\d+)?)s?\s*-\s*(.+)',
+                # Number format: 1. 10.5s - Description
+                r'\d+\.\s*(\d+(?:\.\d+)?)s?\s*-\s*(.+)',
+            ]
+            
+            matched = False
+            for pattern in patterns:
+                match = re.match(pattern, line.strip())
+                if match:
+                    timestamp_seconds = float(match.group(1))
+                    rating = int(match.group(2)) if len(match.groups()) >= 3 and match.group(2).isdigit() else 5
+                    description = match.group(-1).strip()  # Always the last group
+                    
+                    # Generate YouTube URL with timestamp
+                    youtube_url = f"https://www.youtube.com/watch?v={video_id}&t={int(timestamp_seconds)}s"
+                    
+                    timestamps.append({
+                        'timestamp_seconds': timestamp_seconds,
+                        'timestamp_formatted': self._format_timestamp(timestamp_seconds),
+                        'description': description,
+                        'importance_rating': rating,
+                        'youtube_url': youtube_url
+                    })
+                    matched = True
+                    break
+            
+            if not matched:
+                self.logger.warning(f"Could not parse timestamp line: {line.strip()}")
+        
+        # Sort by timestamp
+        timestamps.sort(key=lambda x: x['timestamp_seconds'])
+        
+        # Log results for debugging
+        self.logger.debug(f"Parsed {len(timestamps)} timestamps from response")
+        
+        return timestamps
+    
+    def _generate_fallback_timestamps(self, raw_transcript: List[Dict[str, Any]], video_id: str, count: int) -> List[Dict[str, Any]]:
+        """Generate fallback timestamps when LLM parsing fails."""
+        timestamps = []
+        
+        if not raw_transcript:
+            return timestamps
+        
+        # Calculate video duration
+        total_duration = sum(segment.get('duration', 0) for segment in raw_transcript)
+        if total_duration == 0:
+            # Fallback: use last segment's end time
+            last_segment = raw_transcript[-1]
+            total_duration = last_segment.get('start', 0) + last_segment.get('duration', 30)
+        
+        # Generate evenly spaced timestamps
+        for i in range(count):
+            timestamp_seconds = (i + 1) * (total_duration / (count + 1))
+            
+            # Find the closest transcript segment
+            closest_segment = min(raw_transcript, key=lambda x: abs(x.get('start', 0) - timestamp_seconds))
+            
+            # Generate YouTube URL with timestamp
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}&t={int(timestamp_seconds)}s"
+            
+            timestamps.append({
+                'timestamp_seconds': timestamp_seconds,
+                'timestamp_formatted': self._format_timestamp(timestamp_seconds),
+                'description': f"Key moment: {closest_segment.get('text', 'Content at this timestamp')[:50]}...",
+                'importance_rating': 5,  # Default rating
+                'youtube_url': youtube_url
+            })
+        
+        return timestamps
+    
+    def _format_timestamp(self, seconds: float) -> str:
+        """Format timestamp in MM:SS or HH:MM:SS format."""
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
 
 
 class KeywordExtractionNode(BaseProcessingNode):
@@ -1136,7 +1469,7 @@ class KeywordExtractionNode(BaseProcessingNode):
     
     def __init__(self, max_retries: int = 3, retry_delay: float = 1.5):
         super().__init__("KeywordExtractionNode", max_retries, retry_delay)
-        self.llm_client = None
+        self.smart_llm_client = None
         self.default_keyword_count = 6  # Middle of 5-8 range
     
     def prep(self, store: Store) -> Dict[str, Any]:
@@ -1181,20 +1514,11 @@ class KeywordExtractionNode(BaseProcessingNode):
             video_id = transcript_data.get('video_id', 'unknown')
             video_title = video_metadata.get('title', 'Unknown')
             
-            # Initialize LLM client
+            # Initialize Smart LLM client
             try:
-                provider = os.getenv('LLM_PROVIDER', 'openai')
-                model = os.getenv('LLM_MODEL', 'gpt-3.5-turbo')
-                
-                self.llm_client = create_llm_client(
-                    provider=provider,
-                    model=model,
-                    max_tokens=300,  # Sufficient for keyword extraction
-                    temperature=0.2  # Low temperature for consistent results
-                )
-                
+                self.smart_llm_client = SmartLLMClient()
             except Exception as e:
-                raise ValueError(f"Failed to initialize LLM client: {str(e)}")
+                raise ValueError(f"Failed to initialize Smart LLM client: {str(e)}")
             
             prep_result = {
                 'video_id': video_id,
@@ -1204,8 +1528,6 @@ class KeywordExtractionNode(BaseProcessingNode):
                 'text_word_count': word_count,
                 'keyword_count': self.default_keyword_count,
                 'has_summary': bool(summary_text),
-                'llm_provider': provider,
-                'llm_model': model,
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
             }
@@ -1251,11 +1573,29 @@ class KeywordExtractionNode(BaseProcessingNode):
             try:
                 self._retry_with_delay(retry_count)
                 
-                # Extract keywords using LLM
-                keywords_result = self.llm_client.extract_keywords(
+                # Get language detection results for language-specific processing
+                language_detection_result = store.get('language_detection_result', {})
+                detected_language = language_detection_result.get('detected_language', 'en')
+                is_chinese = language_detection_result.get('is_chinese', False)
+                
+                # Create task requirements for smart model selection
+                task_requirements = detect_task_requirements(
                     text=extraction_text,
-                    count=keyword_count,
-                    include_phrases=True
+                    task_type="keywords",
+                    quality_level="medium"
+                )
+                
+                # Add language information to task requirements
+                if detected_language:
+                    task_requirements.language = detected_language
+                    task_requirements.is_chinese = is_chinese
+                
+                # Generate keywords using smart client with language awareness
+                keywords_result = self._generate_keywords_with_smart_client(
+                    extraction_text,
+                    keyword_count,
+                    task_requirements,
+                    is_chinese=is_chinese
                 )
                 
                 # Validate extracted keywords
@@ -1377,8 +1717,8 @@ class KeywordExtractionNode(BaseProcessingNode):
                         exec_result.get('exec_timestamp', '')
                     ),
                     'retry_count': exec_result.get('retry_count', 0),
-                    'llm_provider': prep_result.get('llm_provider', 'unknown'),
-                    'llm_model': prep_result.get('llm_model', 'unknown')
+                    'llm_provider': exec_result.get('llm_metadata', {}).get('provider', 'unknown'),
+                    'llm_model': exec_result.get('llm_metadata', {}).get('model', 'unknown')
                 }
             }
             
@@ -1408,6 +1748,63 @@ class KeywordExtractionNode(BaseProcessingNode):
                 'post_timestamp': datetime.utcnow().isoformat()
             }
     
+    def _generate_keywords_with_smart_client(
+        self,
+        text: str,
+        count: int,
+        task_requirements: TaskRequirements,
+        is_chinese: bool = False
+    ) -> Dict[str, Any]:
+        """Generate keywords using the smart LLM client."""
+        
+        # Create keyword extraction prompt
+        system_prompt = f"""You are an expert at extracting relevant keywords from text. Extract the {count} most important keywords and key phrases from the provided text.
+
+Guidelines:
+- Focus on the most relevant and significant terms
+- Include both single words and short phrases if relevant
+- Avoid common stop words unless they're part of important phrases
+- Consider the context and domain of the text
+- Provide keywords that would be useful for search and categorization"""
+
+        user_prompt = f"""Extract the {count} most important keywords from this text:
+
+{text}
+
+Please provide exactly {count} keywords, one per line, without numbering or bullets:"""
+
+        # Generate with smart client using language-appropriate method
+        if is_chinese:
+            # Use Chinese-optimized processing
+            result = self.smart_llm_client.generate_text_with_chinese_optimization(
+                text=text,
+                task_requirements=task_requirements,
+                max_tokens=300,
+                temperature=0.2
+            )
+        else:
+            # Use standard processing for English/other languages
+            result = self.smart_llm_client.generate_text_with_fallback(
+                prompt=text,
+                task_requirements=task_requirements,
+                max_tokens=300,
+                temperature=0.2
+            )
+        
+        # Parse keywords from response
+        keywords_text = result['text'].strip()
+        keywords = [kw.strip() for kw in keywords_text.split('\n') if kw.strip()]
+        
+        # Ensure we have the right number of keywords
+        keywords = keywords[:count]
+        
+        return {
+            'keywords': keywords,
+            'count': len(keywords),
+            'requested_count': count,
+            'generation_metadata': result
+        }
+
     def _enhance_keywords(
         self, 
         keywords: List[str], 
