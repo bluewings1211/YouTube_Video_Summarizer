@@ -78,8 +78,8 @@ class TranscriptAcquisitionLogger:
         self.session_stats['total_attempts'] += 1
         self.session_stats['videos_processed'].add(video_id)
         
-        self.logger.info(f"🎬 Starting transcript acquisition for video: {video_id}")
-        self.logger.info(f"Strategy: {strategy}, Preferred languages: {preferred_languages or 'auto-detect'}")
+        self.logger.debug(f"Starting transcript acquisition for video: {video_id}")
+        self.logger.debug(f"Strategy: {strategy}, Preferred languages: {preferred_languages or 'auto-detect'}")
     
     def log_video_metadata(self, video_id: str, metadata: Dict[str, Any]) -> None:
         """Log video metadata information."""
@@ -88,21 +88,21 @@ class TranscriptAcquisitionLogger:
             title = metadata.get('title', 'unknown')[:50] + '...' if len(metadata.get('title', '')) > 50 else metadata.get('title', 'unknown')
             language = metadata.get('language', 'unknown')
             
-            self.logger.info(f"📹 Video metadata - Title: {title}")
-            self.logger.info(f"Duration: {duration}s, Language: {language}")
+            self.logger.debug(f"Video metadata - Title: {title}")
+            self.logger.debug(f"Duration: {duration}s, Language: {language}")
         else:
-            self.logger.warning(f"⚠️  No metadata available for video: {video_id}")
+            self.logger.warning(f"No metadata available for video: {video_id}")
     
     def log_strategy_planning(self, video_id: str, strategy_order: List[Any], 
                             total_options: int, detection_result: Any = None) -> None:
         """Log transcript strategy planning information."""
-        self.logger.info(f"🎯 Planning transcript strategy for {video_id}")
-        self.logger.info(f"Total transcript options available: {total_options}")
+        self.logger.debug(f"Planning transcript strategy for {video_id}")
+        self.logger.debug(f"Total transcript options available: {total_options}")
         
         if detection_result:
             detected_lang = getattr(detection_result, 'detected_language', 'unknown')
             confidence = getattr(detection_result, 'confidence_score', 0)
-            self.logger.info(f"Language detection: {detected_lang} (confidence: {confidence:.2f})")
+            self.logger.debug(f"Language detection: {detected_lang} (confidence: {confidence:.2f})")
         
         for i, tier in enumerate(strategy_order, 1):
             tier_name = getattr(tier, 'tier_name', 'unknown')
@@ -116,15 +116,15 @@ class TranscriptAcquisitionLogger:
             self.session_stats['tiers_used'][tier] = 0
         self.session_stats['tiers_used'][tier] += 1
         
-        self.logger.info(f"🎭 Tier {attempt_number}: Attempting {tier} transcript ({language}) for {video_id}")
+        self.logger.debug(f"Tier {attempt_number}: Attempting {tier} transcript ({language}) for {video_id}")
     
     def log_tier_attempt_success(self, video_id: str, tier: str, language: str, 
                                word_count: int, duration: float) -> None:
         """Log successful tier attempt."""
         self.session_stats['successful_attempts'] += 1
         
-        self.logger.info(f"✅ Success! {tier} transcript acquired for {video_id}")
-        self.logger.info(f"Language: {language}, Words: {word_count}, Duration: {duration:.1f}s")
+        self.logger.info(f"Success! {tier} transcript acquired for {video_id}")
+        self.logger.debug(f"Language: {language}, Words: {word_count}, Duration: {duration:.1f}s")
     
     def log_tier_attempt_failure(self, video_id: str, tier: str, language: str, 
                                error: str, error_type: str = "unknown") -> None:
@@ -135,46 +135,46 @@ class TranscriptAcquisitionLogger:
             self.session_stats['error_counts'][error_type] = 0
         self.session_stats['error_counts'][error_type] += 1
         
-        self.logger.warning(f"❌ {tier} transcript failed for {video_id}")
-        self.logger.warning(f"Error type: {error_type}, Details: {error}")
+        self.logger.warning(f"{tier} transcript failed for {video_id}")
+        self.logger.debug(f"Error type: {error_type}, Details: {error}")
     
     def log_tier_fallback(self, video_id: str, from_tier: str, to_tier: str, 
                          reason: str) -> None:
         """Log tier fallback."""
-        self.logger.info(f"🔄 Falling back from {from_tier} to {to_tier} for {video_id}")
-        self.logger.info(f"Reason: {reason}")
+        self.logger.debug(f"Falling back from {from_tier} to {to_tier} for {video_id}")
+        self.logger.debug(f"Reason: {reason}")
     
     def log_unsupported_video(self, video_id: str, reason: str, issues: List[Dict]) -> None:
         """Log unsupported video detection."""
-        self.logger.warning(f"🚫 Video {video_id} is unsupported: {reason}")
+        self.logger.warning(f"Video {video_id} is unsupported: {reason}")
         
         for issue in issues:
             issue_type = issue.get('type', 'unknown')
             message = issue.get('message', 'No details')
-            self.logger.warning(f"  - {issue_type}: {message}")
+            self.logger.debug(f"  - {issue_type}: {message}")
     
     def log_acquisition_complete(self, video_id: str, success: bool, 
                                final_language: str = None, processing_time: float = 0,
                                total_attempts: int = 0) -> None:
         """Log completion of transcript acquisition."""
         if success:
-            self.logger.info(f"🎉 Transcript acquisition completed for {video_id}")
-            self.logger.info(f"Final language: {final_language}, Time: {processing_time:.2f}s, Attempts: {total_attempts}")
+            self.logger.info(f"Transcript acquisition completed for {video_id}")
+            self.logger.debug(f"Final language: {final_language}, Time: {processing_time:.2f}s, Attempts: {total_attempts}")
         else:
-            self.logger.error(f"💥 Transcript acquisition failed for {video_id}")
-            self.logger.error(f"Processing time: {processing_time:.2f}s, Total attempts: {total_attempts}")
+            self.logger.error(f"Transcript acquisition failed for {video_id}")
+            self.logger.debug(f"Processing time: {processing_time:.2f}s, Total attempts: {total_attempts}")
     
     def log_performance_metrics(self, video_id: str, metrics: Dict[str, Any]) -> None:
         """Log performance metrics."""
-        self.logger.debug(f"📊 Performance metrics for {video_id}:")
+        self.logger.debug(f"Performance metrics for {video_id}:")
         for metric, value in metrics.items():
             self.logger.debug(f"  {metric}: {value}")
     
     def log_error_analysis(self, video_id: str, error_report: Dict[str, Any]) -> None:
         """Log detailed error analysis."""
-        self.logger.error(f"🔍 Error analysis for {video_id}:")
+        self.logger.debug(f"Error analysis for {video_id}:")
         for category, details in error_report.items():
-            self.logger.error(f"  {category}: {details}")
+            self.logger.debug(f"  {category}: {details}")
     
     def log_session_summary(self) -> Dict[str, Any]:
         """Log and return session summary statistics."""
@@ -190,10 +190,10 @@ class TranscriptAcquisitionLogger:
             'error_breakdown': self.session_stats['error_counts']
         }
         
-        self.logger.info("📈 Session Summary:")
-        self.logger.info(f"  Videos processed: {summary['total_videos']}")
-        self.logger.info(f"  Success rate: {summary['success_rate']:.1f}%")
-        self.logger.info(f"  Most used tier: {max(summary['tiers_usage'], key=summary['tiers_usage'].get) if summary['tiers_usage'] else 'none'}")
+        self.logger.debug("Session Summary:")
+        self.logger.debug(f"  Videos processed: {summary['total_videos']}")
+        self.logger.debug(f"  Success rate: {summary['success_rate']:.1f}%")
+        self.logger.debug(f"  Most used tier: {max(summary['tiers_usage'], key=summary['tiers_usage'].get) if summary['tiers_usage'] else 'none'}")
         
         return summary
     

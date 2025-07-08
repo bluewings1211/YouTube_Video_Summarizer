@@ -277,15 +277,12 @@ class YouTubeSummarizerFlow(Flow):
                     logger.warning(f"Circuit breaker open for {node_name}, skipping")
                     continue
                 
-                # Debug log node execution
-                logger.info(f"About to execute node: {node_name}")
-                
                 # Execute node
                 result = self._execute_single_node(node_name)
                 results[node_name] = result
                 
-                # Debug log node completion
-                logger.info(f"Node {node_name} completed with result keys: {list(result.keys())}")
+                # Log node completion
+                logger.debug(f"Node {node_name} completed with result keys: {list(result.keys())}")
                 
                 # Record success
                 self.error_handler.handle_node_success(node_name)
@@ -757,7 +754,7 @@ class YouTubeSummarizerFlow(Flow):
         """Check if a node should be executed based on configuration."""
         node_config = self.config.get_node_config(node_name)
         should_execute = node_config and node_config.enabled
-        logger.info(f"Node {node_name}: config exists={node_config is not None}, enabled={node_config.enabled if node_config else False}, should_execute={should_execute}")
+        logger.debug(f"Node {node_name}: config exists={node_config is not None}, enabled={node_config.enabled if node_config else False}, should_execute={should_execute}")
         return should_execute
 
     def _initialize_configured_nodes(self) -> None:
@@ -851,16 +848,14 @@ class YouTubeSummarizerFlow(Flow):
         # Extract data from store for API compatibility
         store_data = dict(self.store)
         
-        # Debug logging
-        logger.info(f"Store data keys: {list(store_data.keys())}")
-        logger.info(f"Store data content: {store_data}")
-        
         # Extract video metadata if available
         video_metadata = store_data.get('video_metadata', {})
         transcript_data = store_data.get('transcript_data', {})
         
-        logger.info(f"Video metadata: {video_metadata}")
-        logger.info(f"Transcript data keys: {list(transcript_data.keys()) if transcript_data else 'None'}")
+        # Log basic success info without dumping full data
+        video_title = video_metadata.get('title', 'Unknown')[:50] + '...' if len(video_metadata.get('title', '')) > 50 else video_metadata.get('title', 'Unknown')
+        transcript_length = transcript_data.get('word_count', 0) if transcript_data else 0
+        logger.info(f"Final result prepared: '{video_title}' ({transcript_length} words)")
         
         # Build the data structure that the API expects
         api_data = {
