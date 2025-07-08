@@ -25,6 +25,35 @@ A comprehensive web service that automatically extracts, summarizes, and analyze
 - PostgreSQL 15+ (or use Docker Compose)
 - OpenAI or Anthropic API key
 
+### 🚀 Quick Setup (5 minutes)
+
+For the fastest setup using Docker Compose:
+
+```bash
+# 1. Clone the repository
+git clone <repository-url>
+cd youtube-summarizer-wave
+
+# 2. Create .env file with your API key
+echo "OPENAI_API_KEY=your_openai_api_key_here" > .env
+echo "DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/youtube_summarizer" >> .env
+
+# 3. Start all services (PostgreSQL + App)
+docker-compose up -d
+
+# 4. Run database migrations
+docker-compose exec app alembic upgrade head
+
+# 5. Test the service
+curl http://localhost:8000/health
+curl http://localhost:8000/health/database
+
+# 🎉 Ready to use!
+curl -X POST "http://localhost:8000/api/v1/summarize" \
+  -H "Content-Type: application/json" \
+  -d '{"youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
+```
+
 ### 1. Clone and Setup
 
 ```bash
@@ -62,12 +91,95 @@ PORT=8000
 HOST=0.0.0.0
 ```
 
-### 3. Start the Service
+### 3. Database Setup
+
+#### Option A: Using Docker Compose (Recommended)
+
+```bash
+# Start PostgreSQL service first
+docker-compose up -d postgres
+
+# Wait for database to be ready (check logs)
+docker-compose logs postgres
+
+# Run database migrations
+alembic upgrade head
+
+# Verify database setup
+curl http://localhost:8000/health/database
+```
+
+#### Option B: Manual PostgreSQL Installation
+
+**macOS (using Homebrew):**
+```bash
+# Install PostgreSQL
+brew install postgresql@15
+
+# Start PostgreSQL service
+brew services start postgresql@15
+
+# Create database and user
+createdb youtube_summarizer
+psql postgres -c "CREATE USER youtube_user WITH PASSWORD 'your_password';"
+psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE youtube_summarizer TO youtube_user;"
+
+# Update .env with your database credentials
+# DATABASE_URL=postgresql+asyncpg://youtube_user:your_password@localhost:5432/youtube_summarizer
+```
+
+**Ubuntu/Debian:**
+```bash
+# Install PostgreSQL
+sudo apt update
+sudo apt install postgresql-15 postgresql-contrib
+
+# Start PostgreSQL service
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Create database and user
+sudo -u postgres createdb youtube_summarizer
+sudo -u postgres psql -c "CREATE USER youtube_user WITH PASSWORD 'your_password';"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE youtube_summarizer TO youtube_user;"
+
+# Update .env with your database credentials
+```
+
+**Windows:**
+```bash
+# Download and install PostgreSQL from https://www.postgresql.org/download/windows/
+# Use pgAdmin or psql command line:
+
+# Create database and user
+psql -U postgres -c "CREATE DATABASE youtube_summarizer;"
+psql -U postgres -c "CREATE USER youtube_user WITH PASSWORD 'your_password';"
+psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE youtube_summarizer TO youtube_user;"
+
+# Update .env with your database credentials
+```
+
+#### Run Database Migrations
+
+After setting up PostgreSQL, run the database migrations:
+
+```bash
+# Check migration status
+alembic current
+
+# Run all pending migrations
+alembic upgrade head
+
+# Verify database tables were created
+psql -U youtube_user -d youtube_summarizer -c "\dt"
+```
+
+### 4. Start the Service
 
 #### Using Docker Compose (Recommended)
 
 ```bash
-# Build and start all services
+# Build and start all services (including PostgreSQL)
 make build
 make up
 
@@ -76,6 +188,7 @@ make logs
 
 # Check service health
 curl http://localhost:8000/health
+curl http://localhost:8000/health/database
 ```
 
 #### Using Python Virtual Environment
@@ -98,7 +211,7 @@ alembic upgrade head
 python -m uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 4. Test the API
+### 5. Test the API
 
 ```bash
 # Health check
@@ -513,6 +626,36 @@ Structured JSON logging with:
    ```
    Error: No transcript found for video
    Solution: Use videos with auto-generated or manual transcripts
+   ```
+
+5. **Database Connection Error**
+   ```
+   Error: Connection to database failed
+   Solution: Check PostgreSQL is running and DATABASE_URL is correct
+   
+   # Check PostgreSQL status
+   # macOS: brew services list | grep postgresql
+   # Ubuntu: sudo systemctl status postgresql
+   # Windows: Check Services in Task Manager
+   
+   # Test database connection
+   psql $DATABASE_URL -c "SELECT 1;"
+   ```
+
+6. **Migration Errors**
+   ```
+   Error: Migration failed or database schema mismatch
+   Solution: Reset and rerun migrations
+   
+   # Check current migration
+   alembic current
+   
+   # Reset to base (WARNING: This will drop all data)
+   alembic downgrade base
+   alembic upgrade head
+   
+   # Or create new migration for schema fixes
+   alembic revision --autogenerate -m "Fix schema"
    ```
 
 ### Debug Mode
