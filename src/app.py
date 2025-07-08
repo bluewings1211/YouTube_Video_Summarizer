@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, status, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
@@ -27,6 +27,7 @@ try:
         get_youtube_error, get_llm_error, get_network_error
     )
     from .utils.validators import validate_youtube_url_detailed, URLValidationResult
+    from .database import db_manager, check_database_health, get_database_session
 except ImportError:
     # For testing - try absolute imports
     try:
@@ -37,6 +38,7 @@ except ImportError:
             get_youtube_error, get_llm_error, get_network_error
         )
         from utils.validators import validate_youtube_url_detailed, URLValidationResult
+        from database import db_manager, check_database_health, get_database_session
     except ImportError:
         # Create mock implementations for testing
         class YouTubeSummarizerFlow:
@@ -79,6 +81,17 @@ except ImportError:
         def get_youtube_error(msg, vid=""): return None
         def get_llm_error(msg, prov=""): return None
         def get_network_error(msg, url=""): return None
+        
+        # Mock database classes
+        class MockDBManager:
+            async def initialize(self): return True
+            async def health_check(self): return {"status": "mock"}
+            async def close(self): pass
+        
+        db_manager = MockDBManager()
+        
+        async def check_database_health(): return {"status": "mock"}
+        async def get_database_session(): yield None
 
 # Configure logging
 logging.basicConfig(
@@ -105,6 +118,18 @@ async def lifespan(app: FastAPI):
     # Startup
     app_start_time = time.time()
     logger.info("Initializing YouTube Summarizer API")
+    
+    # Initialize database
+    try:
+        logger.info("Initializing database connection...")
+        db_initialized = await db_manager.initialize()
+        if db_initialized:
+            logger.info("Database initialized successfully")
+        else:
+            logger.warning("Database initialization failed, but continuing startup")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {str(e)}")
+    
     try:
         # Create workflow instance with production configuration
         workflow_instance = YouTubeSummarizerFlow(
@@ -132,6 +157,13 @@ async def lifespan(app: FastAPI):
             logger.info("Workflow instance cleaned up")
         except Exception as e:
             logger.warning(f"Error during workflow cleanup: {str(e)}")
+    
+    # Close database connections
+    try:
+        await db_manager.close()
+        logger.info("Database connections closed")
+    except Exception as e:
+        logger.warning(f"Error during database cleanup: {str(e)}")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -397,13 +429,42 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Health check endpoint
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "version": settings.app_version,
-        "workflow_ready": workflow_instance is not None
-    }
+    """Health check endpoint with database status."""
+    try:
+        # Check database health
+        db_health = await check_database_health()
+        
+        # Determine overall status
+        overall_status = "healthy"
+        if db_health.get("status") != "healthy":
+            overall_status = "degraded"
+        if workflow_instance is None:
+            overall_status = "unhealthy"
+        
+        return {
+            "status": overall_status,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "version": settings.app_version,
+            "components": {
+                "workflow": {
+                    "status": "healthy" if workflow_instance is not None else "unhealthy",
+                    "ready": workflow_instance is not None
+                },
+                "database": {
+                    "status": db_health.get("status", "unknown"),
+                    "response_time_ms": db_health.get("response_time_ms"),
+                    "pool_status": db_health.get("pool_status")
+                }
+            }
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "version": settings.app_version,
+            "error": "Health check failed"
+        }
 
 # Monitoring/metrics endpoint
 @app.get("/metrics", tags=["Monitoring"])
@@ -441,6 +502,29 @@ async def get_metrics():
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
 
+# Database health endpoint
+@app.get("/health/database", tags=["Health"])
+async def database_health():
+    """Detailed database health check endpoint."""
+    try:
+        try:
+            from .database import get_database_info
+        except ImportError:
+            from database import get_database_info
+        
+        db_info = await get_database_info()
+        return {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "database": db_info
+        }
+    except Exception as e:
+        logger.error(f"Database health check failed: {str(e)}")
+        return {
+            "error": "DATABASE_HEALTH_ERROR",
+            "message": "Failed to get database health information",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
 # Root endpoint
 @app.get("/", tags=["Root"])
 async def root():
@@ -452,6 +536,8 @@ async def root():
         "endpoints": {
             "summarize": "/api/v1/summarize",
             "health": "/health",
+            "database_health": "/health/database",
+            "metrics": "/metrics",
             "docs": "/api/docs"
         },
         "timestamp": datetime.utcnow().isoformat() + "Z"
@@ -781,6 +867,18 @@ def convert_timestamp_to_seconds(timestamp_str: str) -> int:
             return 0
     except (ValueError, TypeError):
         return 0
+
+
+# Database dependency for endpoints
+async def get_db_session():
+    """FastAPI dependency to provide database session."""
+    try:
+        async with get_database_session() as session:
+            yield session
+    except Exception as e:
+        logger.error(f"Database session error in dependency: {str(e)}")
+        # Re-raise to be handled by exception handlers
+        raise
 
 # Development server runner
 if __name__ == "__main__":

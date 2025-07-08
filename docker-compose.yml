@@ -18,6 +18,7 @@ services:
       - ./tests:/app/tests
     depends_on:
       - redis
+      - postgres
     networks:
       - youtube-summarizer-network
     restart: unless-stopped
@@ -45,6 +46,27 @@ services:
       retries: 3
       start_period: 30s
 
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=youtube_summarizer
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - youtube-summarizer-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   # Development tools service
   dev-tools:
     build: .
@@ -64,6 +86,7 @@ services:
       - dev
     depends_on:
       - redis
+      - postgres
 
 networks:
   youtube-summarizer-network:
@@ -71,4 +94,6 @@ networks:
 
 volumes:
   redis_data:
+    driver: local
+  postgres_data:
     driver: local

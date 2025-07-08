@@ -188,6 +188,21 @@ class AppConfig(BaseModel):
     auto_reload: bool = config('AUTO_RELOAD', default=True, cast=bool)
     pytest_timeout: int = config('PYTEST_TIMEOUT', default=30, cast=int)
     
+    # Database Configuration
+    database_url: str = config('DATABASE_URL', default='postgresql+asyncpg://postgres:password@localhost:5432/youtube_summarizer')
+    database_host: str = config('DATABASE_HOST', default='localhost')
+    database_port: int = config('DATABASE_PORT', default=5432, cast=int)
+    database_name: str = config('DATABASE_NAME', default='youtube_summarizer')
+    database_user: str = config('DATABASE_USER', default='postgres')
+    database_password: str = config('DATABASE_PASSWORD', default='password')
+    database_pool_size: int = config('DATABASE_POOL_SIZE', default=20, cast=int)
+    database_max_overflow: int = config('DATABASE_MAX_OVERFLOW', default=30, cast=int)
+    database_pool_timeout: int = config('DATABASE_POOL_TIMEOUT', default=30, cast=int)
+    database_pool_recycle: int = config('DATABASE_POOL_RECYCLE', default=1800, cast=int)
+    database_echo: bool = config('DATABASE_ECHO', default=False, cast=bool)
+    database_echo_pool: bool = config('DATABASE_ECHO_POOL', default=False, cast=bool)
+    database_test_url: str = config('DATABASE_TEST_URL', default='postgresql+asyncpg://postgres:password@localhost:5432/youtube_summarizer_test')
+    
     def __init__(self, **kwargs):
         """Initialize configuration and load proxy headers from environment."""
         super().__init__(**kwargs)
@@ -566,6 +581,25 @@ class AppConfig(BaseModel):
     def has_jwt_config(self) -> bool:
         """Check if JWT configuration is available."""
         return self.jwt_secret_key is not None
+    
+    @property
+    def database_config(self) -> Dict[str, Any]:
+        """Get complete database configuration."""
+        return {
+            'url': self.database_url,
+            'host': self.database_host,
+            'port': self.database_port,
+            'name': self.database_name,
+            'user': self.database_user,
+            'password': self.database_password,
+            'pool_size': self.database_pool_size,
+            'max_overflow': self.database_max_overflow,
+            'pool_timeout': self.database_pool_timeout,
+            'pool_recycle': self.database_pool_recycle,
+            'echo': self.database_echo,
+            'echo_pool': self.database_echo_pool,
+            'test_url': self.database_test_url
+        }
     
     def get_credential_manager(self):
         """Get credential manager instance."""
