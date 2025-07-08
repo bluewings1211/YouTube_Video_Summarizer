@@ -27,6 +27,7 @@ from .maintenance import (
     run_maintenance_tasks
 )
 from .monitor import db_monitor, MonitoredOperation
+from .connection import db_manager
 from .exceptions import (
     DatabaseError,
     DatabaseConnectionError,
@@ -64,6 +65,9 @@ __all__ = [
     # Monitoring
     'db_monitor',
     'MonitoredOperation',
+    
+    # Database manager
+    'db_manager',
     
     # Exceptions
     'DatabaseError',

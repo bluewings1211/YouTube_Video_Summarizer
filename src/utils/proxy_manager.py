@@ -27,7 +27,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
-from src.config import settings
+from ..config import settings
 
 # Configure logging
 logger = logging.getLogger(__name__)

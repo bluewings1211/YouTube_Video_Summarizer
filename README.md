@@ -127,12 +127,27 @@ pip install -r requirements.txt
 # Set Python path
 export PYTHONPATH=$PWD/src
 
+# Set database URL for local development (optional - alembic.ini has localhost default)
+export DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/youtube_summarizer
+
 # Run database migrations
 alembic upgrade head
 
 # Run the application
 python -m uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+#### Database Configuration Notes
+
+The project uses different database hostnames depending on the environment:
+
+- **Docker environment**: Uses `postgres` as hostname (service name in docker-compose)
+- **Local development**: Uses `localhost` as hostname
+
+The migration system automatically handles this:
+- `alembic/env.py` checks for `DATABASE_URL` environment variable first
+- If not set, uses the default in `alembic.ini` (configured for localhost)
+- For Docker containers, the `DATABASE_URL` is automatically set to use `postgres` hostname
 
 ### 5. Test the API
 

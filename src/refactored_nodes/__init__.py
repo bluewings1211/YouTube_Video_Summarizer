@@ -15,12 +15,14 @@ All nodes maintain the PocketFlow prep/exec/post pattern for consistency.
 """
 
 from .transcript_nodes import YouTubeTranscriptNode
+from .youtube_data_node import YouTubeDataNode
 from .llm_nodes import SummarizationNode, KeywordExtractionNode
 from .validation_nodes import BaseProcessingNode, NodeError
 from .summary_nodes import TimestampNode
 
 __all__ = [
     'YouTubeTranscriptNode',
+    'YouTubeDataNode',
     'SummarizationNode', 
     'KeywordExtractionNode',
     'TimestampNode',

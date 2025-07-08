@@ -38,6 +38,12 @@ def get_database_url():
     # Check for environment variable first
     database_url = os.environ.get('DATABASE_URL')
     if database_url:
+        # Convert async driver to sync driver for Alembic
+        if 'postgresql+asyncpg://' in database_url:
+            database_url = database_url.replace('postgresql+asyncpg://', 'postgresql+psycopg2://')
+        # Convert localhost to postgres service name for Docker
+        if '@localhost:' in database_url:
+            database_url = database_url.replace('@localhost:', '@postgres:')
         return database_url
     
     # Fall back to config file

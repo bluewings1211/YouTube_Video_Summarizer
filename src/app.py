@@ -27,7 +27,7 @@ try:
         get_youtube_error, get_llm_error, get_network_error
     )
     from .utils.validators import validate_youtube_url_detailed, URLValidationResult
-    from .database import db_manager, check_database_health, get_database_session, get_database_session_dependency
+    from .database import db_manager, check_database_health, get_database_session
 except ImportError:
     # For testing - try absolute imports
     try:
@@ -43,9 +43,12 @@ except ImportError:
         # Create mock implementations for testing
         class YouTubeSummarizerFlow:
             def __init__(self, **kwargs):
-                pass
+                self.video_service = kwargs.get('video_service', None)
+                self.node_instances = {}
             def run(self, input_data):
                 return {'status': 'mock_success', 'data': {}}
+            def _initialize_configured_nodes(self):
+                pass
         
         class WorkflowError:
             def __init__(self, **kwargs):
@@ -70,6 +73,7 @@ except ImportError:
         
         class ErrorCode:
             INVALID_URL_FORMAT = "E1001"
+            INTERNAL_SERVER_ERROR = "E7001"
         
         def validate_youtube_url_detailed(url):
             class MockResult:
@@ -94,6 +98,9 @@ except ImportError:
         async def get_database_session(): yield None
 
 # Configure logging
+import os
+os.makedirs('logs', exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -133,7 +140,7 @@ async def lifespan(app: FastAPI):
     try:
         # Create video service for database operations
         from .services.video_service import VideoService
-        from .database.connection import get_database_session_dependency
+        from .database.connection import get_database_session
         
         # Note: In production, the video service will be properly injected with session
         # For now, we pass None and let dependency injection handle it in the workflow
@@ -262,7 +269,7 @@ class SummarizeRequest(BaseModel):
         None,
         description="Policy for handling duplicate videos",
         example="never",
-        regex="^(never|always|if_failed)$"
+        pattern="^(never|always|if_failed)$"
     )
     
     @validator('youtube_url')
@@ -589,7 +596,7 @@ async def root():
 async def summarize_video(
     request: SummarizeRequest, 
     http_request: Request,
-    db_session = Depends(get_database_session_dependency)
+    db_session = Depends(get_database_session)
 ):
     """
     Summarize a YouTube video with AI-powered analysis.
@@ -651,7 +658,9 @@ async def summarize_video(
         
         # Execute workflow
         try:
+            logger.info(f"[{request_id}] About to call workflow_instance.run() with input_data: {input_data}")
             workflow_result = workflow_instance.run(input_data)
+            logger.info(f"[{request_id}] Workflow returned result: {workflow_result}")
         except Exception as workflow_error:
             logger.error(f"[{request_id}] Workflow execution failed: {str(workflow_error)}")
             

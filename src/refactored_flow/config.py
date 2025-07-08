@@ -104,9 +104,18 @@ class WorkflowConfig:
     def create_default_node_configs(self) -> Dict[str, NodeConfig]:
         """Create default node configurations for all workflow nodes."""
         default_configs = {
+            'YouTubeDataNode': NodeConfig(
+                name='YouTubeDataNode',
+                enabled=True,
+                required=True,
+                max_retries=3,
+                retry_delay=1.0,
+                timeout_seconds=60,
+                output_keys=['transcript_data', 'video_metadata', 'youtube_data']
+            ),
             'YouTubeTranscriptNode': NodeConfig(
                 name='YouTubeTranscriptNode',
-                enabled=True,
+                enabled=False,  # Disabled in favor of YouTubeDataNode
                 required=True,
                 max_retries=3,
                 retry_delay=1.0,
@@ -120,7 +129,7 @@ class WorkflowConfig:
                 max_retries=3,
                 retry_delay=2.0,
                 timeout_seconds=120,
-                dependencies=['YouTubeTranscriptNode'],
+                dependencies=['YouTubeDataNode'],  # Updated dependency
                 output_keys=['summary_data']
             ),
             'TimestampNode': NodeConfig(
@@ -130,7 +139,7 @@ class WorkflowConfig:
                 max_retries=3,
                 retry_delay=2.0,
                 timeout_seconds=90,
-                dependencies=['YouTubeTranscriptNode'],
+                dependencies=['YouTubeDataNode'],  # Updated dependency
                 output_keys=['timestamp_data']
             ),
             'KeywordExtractionNode': NodeConfig(
@@ -140,7 +149,7 @@ class WorkflowConfig:
                 max_retries=3,
                 retry_delay=1.5,
                 timeout_seconds=60,
-                dependencies=['YouTubeTranscriptNode'],
+                dependencies=['YouTubeDataNode'],  # Updated dependency
                 output_keys=['keywords_data']
             )
         }

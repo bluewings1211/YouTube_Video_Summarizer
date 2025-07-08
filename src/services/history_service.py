@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload, joinedload
 from sqlalchemy import select, func, and_, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from dataclasses import dataclass
+from fastapi import Depends
 
 from ..database.models import (
     Video, Transcript, Summary, Keyword, 
@@ -22,6 +23,7 @@ from ..database.exceptions import (
     DatabaseError, DatabaseConnectionError, DatabaseQueryError,
     classify_database_error
 )
+from ..database.connection import get_database_session
 
 logger = logging.getLogger(__name__)
 
@@ -560,7 +562,7 @@ class HistoryService:
 
 
 # Dependency injection function for FastAPI
-def get_history_service(session: AsyncSession) -> HistoryService:
+def get_history_service(session: AsyncSession = Depends(get_database_session)) -> HistoryService:
     """
     Get HistoryService instance for dependency injection.
     

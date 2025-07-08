@@ -14,6 +14,7 @@ The original implementations have been split into focused modules:
 # Import all refactored nodes
 from .refactored_nodes import (
     YouTubeTranscriptNode,
+    YouTubeDataNode,
     SummarizationNode,
     KeywordExtractionNode,
     TimestampNode,
@@ -24,6 +25,7 @@ from .refactored_nodes import (
 # For backward compatibility, ensure all original exports are available
 __all__ = [
     'YouTubeTranscriptNode',
+    'YouTubeDataNode',
     'SummarizationNode',
     'KeywordExtractionNode', 
     'TimestampNode',

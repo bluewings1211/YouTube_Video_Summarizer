@@ -807,14 +807,28 @@ def check_ollama_availability(host: str = "http://localhost:11434") -> Dict[str,
     try:
         client = ollama.Client(host=host)
         models_response = client.list()
-        model_list = models_response.get('models', [])
+        
+        # Handle different response formats
+        if hasattr(models_response, 'models'):
+            # New format: ListResponse object with models attribute
+            model_list = models_response.models
+        elif isinstance(models_response, dict):
+            # Old format: dictionary with 'models' key
+            model_list = models_response.get('models', [])
+        else:
+            # Fallback
+            model_list = []
+        
         available_models = []
         for model_info in model_list:
             name = None
             if isinstance(model_info, dict):
-                name = model_info.get('name')
+                # Handle dict format
+                name = model_info.get('name') or model_info.get('model')
             else:
-                name = getattr(model_info, 'name', None)
+                # Handle object format - try multiple possible attributes
+                name = (getattr(model_info, 'name', None) or 
+                       getattr(model_info, 'model', None))
             
             if name:
                 available_models.append(name)

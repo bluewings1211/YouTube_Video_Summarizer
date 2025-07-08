@@ -46,6 +46,7 @@ from .monitoring import WorkflowMonitor, WorkflowMetrics
 try:
     from ..nodes import (
         YouTubeTranscriptNode,
+        YouTubeDataNode,
         SummarizationNode,
         TimestampNode,
         KeywordExtractionNode,
@@ -178,7 +179,8 @@ class YouTubeSummarizerFlow(Flow):
         Returns:
             Dictionary containing all processing results or error information
         """
-        logger.info("Starting YouTube summarizer workflow")
+        logger.info(f"Starting YouTube summarizer workflow with input: {input_data}")
+        logger.info(f"Workflow config: enable_monitoring={self.enable_monitoring}, enable_fallbacks={self.enable_fallbacks}")
         
         # Start monitoring
         if self.monitor:
@@ -194,14 +196,18 @@ class YouTubeSummarizerFlow(Flow):
             
             # Check for duplicate videos and handle accordingly
             duplicate_result = self._handle_duplicate_detection(input_data)
+            logger.info(f"Duplicate detection result: {duplicate_result}")
             if duplicate_result:
+                logger.info("Returning duplicate result, skipping workflow execution")
                 return duplicate_result
             
             # Check database health and configure graceful degradation
             self._configure_database_degradation()
             
             # Execute workflow with timeout protection
+            logger.info("Starting main workflow execution")
             result = self._execute_workflow_with_timeout()
+            logger.info(f"Workflow execution completed with result keys: {list(result.keys()) if result else 'None'}")
             
             # Save workflow completion metadata
             self._save_workflow_completion_metadata(input_data, result)
@@ -254,7 +260,7 @@ class YouTubeSummarizerFlow(Flow):
         
         # Define node execution order
         node_order = [
-            'YouTubeTranscriptNode',
+            'YouTubeDataNode',  # Unified YouTube data acquisition
             'SummarizationNode', 
             'TimestampNode',
             'KeywordExtractionNode'
@@ -271,17 +277,23 @@ class YouTubeSummarizerFlow(Flow):
                     logger.warning(f"Circuit breaker open for {node_name}, skipping")
                     continue
                 
+                # Debug log node execution
+                logger.info(f"About to execute node: {node_name}")
+                
                 # Execute node
                 result = self._execute_single_node(node_name)
                 results[node_name] = result
+                
+                # Debug log node completion
+                logger.info(f"Node {node_name} completed with result keys: {list(result.keys())}")
                 
                 # Record success
                 self.error_handler.handle_node_success(node_name)
                 if self.monitor:
                     self.monitor.finish_node(node_name, "success")
                 
-                # Perform language detection after transcript
-                if node_name == 'YouTubeTranscriptNode' and result.get('post_status') == 'success':
+                # Perform language detection after YouTube data acquisition
+                if node_name == 'YouTubeDataNode' and result.get('post_status') == 'success':
                     self._perform_language_detection()
                 
             except Exception as e:
@@ -744,7 +756,9 @@ class YouTubeSummarizerFlow(Flow):
     def _should_execute_node(self, node_name: str) -> bool:
         """Check if a node should be executed based on configuration."""
         node_config = self.config.get_node_config(node_name)
-        return node_config and node_config.enabled
+        should_execute = node_config and node_config.enabled
+        logger.info(f"Node {node_name}: config exists={node_config is not None}, enabled={node_config.enabled if node_config else False}, should_execute={should_execute}")
+        return should_execute
 
     def _initialize_configured_nodes(self) -> None:
         """Initialize nodes based on configuration."""
@@ -753,7 +767,7 @@ class YouTubeSummarizerFlow(Flow):
         
         # Create node instances
         node_classes = {
-            'YouTubeTranscriptNode': YouTubeTranscriptNode,
+            'YouTubeDataNode': YouTubeDataNode,  # Unified YouTube data acquisition
             'SummarizationNode': SummarizationNode,
             'TimestampNode': TimestampNode,
             'KeywordExtractionNode': KeywordExtractionNode
@@ -816,9 +830,9 @@ class YouTubeSummarizerFlow(Flow):
             self.store = Store()
             self.store.update(input_data)
             
-            # Try to execute just the transcript node
-            if 'YouTubeTranscriptNode' in self.node_instances:
-                result = self._execute_single_node('YouTubeTranscriptNode')
+            # Try to execute just the YouTube data node
+            if 'YouTubeDataNode' in self.node_instances:
+                result = self._execute_single_node('YouTubeDataNode')
                 
                 return {
                     'success': True,
@@ -834,10 +848,35 @@ class YouTubeSummarizerFlow(Flow):
 
     def _prepare_final_result(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare the final workflow result."""
+        # Extract data from store for API compatibility
+        store_data = dict(self.store)
+        
+        # Debug logging
+        logger.info(f"Store data keys: {list(store_data.keys())}")
+        logger.info(f"Store data content: {store_data}")
+        
+        # Extract video metadata if available
+        video_metadata = store_data.get('video_metadata', {})
+        transcript_data = store_data.get('transcript_data', {})
+        
+        logger.info(f"Video metadata: {video_metadata}")
+        logger.info(f"Transcript data keys: {list(transcript_data.keys()) if transcript_data else 'None'}")
+        
+        # Build the data structure that the API expects
+        api_data = {
+            'video_id': video_metadata.get('video_id', store_data.get('video_id', '')),
+            'title': video_metadata.get('title', store_data.get('video_title', '')),
+            'duration': video_metadata.get('duration', store_data.get('video_duration', 0)),
+            'summary': store_data.get('summary_text', ''),
+            'keywords': store_data.get('keywords', []),
+            'timestamps': store_data.get('timestamps', [])
+        }
+        
         final_result = {
-            'success': True,
+            'status': 'success',
+            'data': api_data,
             'results': results,
-            'store_data': dict(self.store),
+            'store_data': store_data,
             'workflow_metadata': {
                 'execution_time': time.time(),
                 'nodes_executed': list(results.keys()),
@@ -859,7 +898,7 @@ class YouTubeSummarizerFlow(Flow):
     def _prepare_error_result(self, error_info: WorkflowError) -> Dict[str, Any]:
         """Prepare an error result."""
         return {
-            'success': False,
+            'status': 'failed',
             'error': error_info.to_dict(),
             'store_data': dict(self.store) if hasattr(self, 'store') else {},
             'error_summary': self.error_handler.get_error_summary(),

@@ -157,8 +157,8 @@ class VideoListParams(BaseModel):
     """Query parameters for video list endpoint."""
     page: int = Field(1, ge=1, description="Page number (1-based)")
     page_size: int = Field(20, ge=1, le=100, description="Number of items per page")
-    sort_by: str = Field("created_at", regex="^(created_at|updated_at|title)$", description="Sort field")
-    sort_order: str = Field("desc", regex="^(asc|desc)$", description="Sort order")
+    sort_by: str = Field("created_at", pattern="^(created_at|updated_at|title)$", description="Sort field")
+    sort_order: str = Field("desc", pattern="^(asc|desc)$", description="Sort order")
     
     @validator('sort_by')
     def validate_sort_by(cls, v):
@@ -189,13 +189,12 @@ class VideoFilterParams(BaseModel):
 async def get_videos(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(20, ge=1, le=100, description="Number of items per page"),
-    sort_by: str = Query("created_at", regex="^(created_at|updated_at|title)$", description="Sort field"),
-    sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order"),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|title)$", description="Sort field"),
+    sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort order"),
     date_from: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
     keywords: Optional[str] = Query(None, description="Keywords to search for"),
     title_search: Optional[str] = Query(None, description="Search in video titles"),
-    session: AsyncSession = Depends(get_database_session),
     history_service: HistoryService = Depends(get_history_service)
 ):
     """
@@ -297,7 +296,6 @@ async def get_videos(
 @router.get("/videos/{video_id}", response_model=VideoDetailResponse)
 async def get_video_detail(
     video_id: int,
-    session: AsyncSession = Depends(get_database_session),
     history_service: HistoryService = Depends(get_history_service)
 ):
     """
@@ -388,7 +386,6 @@ async def get_video_detail(
 
 @router.get("/statistics", response_model=VideoStatisticsResponse)
 async def get_video_statistics(
-    session: AsyncSession = Depends(get_database_session),
     history_service: HistoryService = Depends(get_history_service)
 ):
     """
@@ -431,22 +428,5 @@ async def health_check():
     return {"status": "healthy", "service": "history_api"}
 
 
-# Error handlers
-@router.exception_handler(ValueError)
-async def value_error_handler(request, exc):
-    """Handle validation errors."""
-    return ErrorResponse(
-        error="validation_error",
-        message=str(exc),
-        details={"request_path": str(request.url.path)}
-    )
-
-
-@router.exception_handler(HistoryServiceError)
-async def history_service_error_handler(request, exc):
-    """Handle history service errors."""
-    return ErrorResponse(
-        error="history_service_error",
-        message=str(exc),
-        details={"request_path": str(request.url.path)}
-    )
+# Error handlers would be added to the main app, not the router
+# These are handled in the endpoints with try/catch blocks instead

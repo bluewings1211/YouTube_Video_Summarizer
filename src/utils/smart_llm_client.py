@@ -71,7 +71,7 @@ class SmartLLMClient:
     def _get_default_config(self) -> Dict[str, Any]:
         """Get default configuration from environment and config module."""
         try:
-            from src.config import settings
+            from ..config import settings
             return settings.llm_config
         except ImportError:
             # Fallback configuration if config module not available
