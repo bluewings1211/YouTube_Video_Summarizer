@@ -48,6 +48,15 @@ class FallbackStrategy:
     enable_transcript_only: bool = True      # Fallback to transcript only
     enable_summary_fallback: bool = True     # Use simpler summary if AI fails
     enable_partial_results: bool = True      # Return partial results on failure
+
+
+@dataclass
+class DuplicateHandlingConfig:
+    """Configuration for duplicate video detection and handling."""
+    enable_duplicate_detection: bool = True
+    reprocess_policy: str = "never"  # "never", "always", "if_failed"
+    cache_expiry_hours: int = 24  # Hours after which to consider reprocessing
+    allow_policy_override: bool = True  # Allow per-request policy override
     enable_retry_with_degraded: bool = True  # Retry with reduced functionality
     max_fallback_attempts: int = 2           # Maximum fallback attempts
     fallback_timeout_factor: float = 0.5     # Reduce timeout for fallbacks
@@ -85,6 +94,7 @@ class WorkflowConfig:
     fallback_strategy: FallbackStrategy = field(default_factory=FallbackStrategy)
     circuit_breaker_config: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
     language_processing: LanguageProcessingConfig = field(default_factory=LanguageProcessingConfig)
+    duplicate_handling: DuplicateHandlingConfig = field(default_factory=DuplicateHandlingConfig)
     enable_monitoring: bool = True
     enable_fallbacks: bool = True
     max_retries: int = 2

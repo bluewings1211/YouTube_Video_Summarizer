@@ -27,7 +27,7 @@ try:
         get_youtube_error, get_llm_error, get_network_error
     )
     from .utils.validators import validate_youtube_url_detailed, URLValidationResult
-    from .database import db_manager, check_database_health, get_database_session
+    from .database import db_manager, check_database_health, get_database_session, get_database_session_dependency
 except ImportError:
     # For testing - try absolute imports
     try:
@@ -131,12 +131,21 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize database: {str(e)}")
     
     try:
+        # Create video service for database operations
+        from .services.video_service import VideoService
+        from .database.connection import get_database_session_dependency
+        
+        # Note: In production, the video service will be properly injected with session
+        # For now, we pass None and let dependency injection handle it in the workflow
+        video_service = None  # Will be properly injected during request processing
+        
         # Create workflow instance with production configuration
         workflow_instance = YouTubeSummarizerFlow(
             enable_monitoring=True,
             enable_fallbacks=True,
             max_retries=2,
-            timeout_seconds=300
+            timeout_seconds=300,
+            video_service=video_service
         )
         logger.info("Workflow instance initialized successfully")
     except Exception as e:
@@ -236,6 +245,12 @@ class SummarizeRequest(BaseModel):
         ...,
         description="YouTube video URL to summarize",
         example="https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    )
+    reprocess_policy: Optional[str] = Field(
+        None,
+        description="Policy for handling duplicate videos",
+        example="never",
+        regex="^(never|always|if_failed)$"
     )
     
     @validator('youtube_url')
@@ -556,7 +571,11 @@ async def root():
     summary="Summarize YouTube Video",
     description="Extract transcript, generate summary, timestamps, and keywords from a YouTube video"
 )
-async def summarize_video(request: SummarizeRequest, http_request: Request):
+async def summarize_video(
+    request: SummarizeRequest, 
+    http_request: Request,
+    db_session = Depends(get_database_session_dependency)
+):
     """
     Summarize a YouTube video with AI-powered analysis.
     
@@ -596,8 +615,24 @@ async def summarize_video(request: SummarizeRequest, http_request: Request):
             'request_id': request_id
         }
         
+        # Add reprocess policy if provided
+        if request.reprocess_policy:
+            input_data['reprocess_policy'] = request.reprocess_policy
+        
         # Log workflow execution start
         logger.info(f"[{request_id}] Starting workflow execution")
+        
+        # Create video service with database session for this request
+        from .services.video_service import VideoService
+        video_service = VideoService(db_session)
+        
+        # Temporarily update workflow with video service for this request
+        original_video_service = workflow_instance.video_service
+        workflow_instance.video_service = video_service
+        
+        # Re-initialize nodes with the video service (if needed)
+        if workflow_instance.node_instances:
+            workflow_instance._initialize_configured_nodes()
         
         # Execute workflow
         try:

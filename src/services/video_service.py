@@ -1,0 +1,658 @@
+"""
+Video processing service with database persistence.
+
+This service handles all database operations for video processing,
+including saving transcripts, summaries, keywords, and metadata.
+"""
+
+import logging
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import select, update, delete
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError, TimeoutError
+
+from ..database.models import (
+    Video, Transcript, Summary, Keyword, 
+    TimestampedSegment, ProcessingMetadata
+)
+from ..database.connection import get_database_session
+from ..database.exceptions import (
+    DatabaseError, DatabaseConnectionError, DatabaseQueryError,
+    DatabaseConstraintError, DatabaseTimeoutError, DatabaseUnavailableError,
+    classify_database_error, is_recoverable_error, should_retry_operation
+)
+from ..database.monitor import MonitoredOperation, db_monitor
+
+logger = logging.getLogger(__name__)
+
+
+class VideoServiceError(Exception):
+    """Custom exception for video service operations."""
+    pass
+
+
+class VideoService:
+    """
+    Service class for managing video processing and database persistence.
+    
+    This class provides methods to create video records, save processing results,
+    and manage video data in the database.
+    """
+
+    def __init__(self, session: Optional[AsyncSession] = None, max_retries: int = 3, retry_delay: float = 1.0):
+        """
+        Initialize the video service.
+        
+        Args:
+            session: Optional database session. If not provided, will use dependency injection.
+            max_retries: Maximum number of retries for database operations
+            retry_delay: Delay between retries in seconds
+        """
+        self._session = session
+        self._logger = logging.getLogger(f"{__name__}.VideoService")
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+
+    async def _get_session(self) -> AsyncSession:
+        """Get database session (internal method)."""
+        if self._session:
+            return self._session
+        else:
+            # This should be used with dependency injection
+            raise VideoServiceError("No database session provided")
+
+    async def _retry_database_operation(self, operation, *args, **kwargs):
+        """
+        Retry a database operation with exponential backoff.
+        
+        Args:
+            operation: Async function to retry
+            *args: Arguments for the operation
+            **kwargs: Keyword arguments for the operation
+            
+        Returns:
+            Result of the operation
+            
+        Raises:
+            DatabaseError: If all retries fail
+        """
+        import asyncio
+        
+        last_error = None
+        retry_count = 0
+        
+        while retry_count <= self.max_retries:
+            try:
+                return await operation(*args, **kwargs)
+                
+            except Exception as e:
+                # Classify the error
+                if isinstance(e, DatabaseError):
+                    db_error = e
+                else:
+                    db_error = classify_database_error(e)
+                
+                last_error = db_error
+                
+                # Check if we should retry
+                if not should_retry_operation(db_error, retry_count, self.max_retries):
+                    self._logger.error(f"Database operation failed, not retrying: {db_error}")
+                    raise
+                
+                retry_count += 1
+                delay = self.retry_delay * (2 ** (retry_count - 1))  # Exponential backoff
+                
+                self._logger.warning(
+                    f"Database operation failed (attempt {retry_count}/{self.max_retries + 1}), "
+                    f"retrying in {delay:.2f}s: {db_error}"
+                )
+                
+                await asyncio.sleep(delay)
+        
+        # All retries exhausted
+        self._logger.error(f"Database operation failed after {retry_count} retries: {last_error}")
+        raise last_error
+
+    async def create_video_record(
+        self,
+        video_id: str,
+        title: str,
+        duration: Optional[int] = None,
+        url: Optional[str] = None
+    ) -> Video:
+        """
+        Create a new video record in the database.
+        
+        Args:
+            video_id: YouTube video ID
+            title: Video title
+            duration: Video duration in seconds
+            url: Video URL
+            
+        Returns:
+            Created Video object
+            
+        Raises:
+            VideoServiceError: If creation fails
+        """
+        with MonitoredOperation("create_video_record"):
+            try:
+                session = await self._get_session()
+                
+                # Check if video already exists
+                existing_video = await self.get_video_by_video_id(video_id)
+                if existing_video:
+                    self._logger.info(f"Video {video_id} already exists, returning existing record")
+                    return existing_video
+                
+                # Create new video record
+                video = Video(
+                    video_id=video_id,
+                    title=title,
+                    duration=duration,
+                    url=url or f"https://www.youtube.com/watch?v={video_id}"
+                )
+                
+                session.add(video)
+                await session.commit()
+                await session.refresh(video)
+                
+                self._logger.info(f"Created video record for {video_id}")
+                return video
+                
+            except IntegrityError as e:
+                # Handle constraint violations (e.g., duplicate video_id)
+                db_error = DatabaseConstraintError(
+                    f"Video {video_id} already exists or constraint violation",
+                    constraint_name="unique_video_id",
+                    original_error=e,
+                    context={'video_id': video_id}
+                )
+                self._logger.error(f"Constraint error creating video record: {db_error}")
+                raise VideoServiceError(f"Failed to create video record: {db_error.message}")
+            
+            except TimeoutError as e:
+                # Handle database timeouts
+                db_error = DatabaseTimeoutError(
+                    f"Database timeout creating video record for {video_id}",
+                    original_error=e,
+                    context={'video_id': video_id, 'operation': 'create_video'}
+                )
+                self._logger.error(f"Timeout error creating video record: {db_error}")
+                raise VideoServiceError(f"Failed to create video record: {db_error.message}")
+            
+            except SQLAlchemyError as e:
+                # Classify and handle other SQLAlchemy errors
+                db_error = classify_database_error(e)
+                db_error.context = db_error.context or {}
+                db_error.context.update({'video_id': video_id, 'operation': 'create_video'})
+                
+                self._logger.error(f"Database error creating video record: {db_error}")
+                raise VideoServiceError(f"Failed to create video record: {db_error.message}")
+            
+            except Exception as e:
+                self._logger.error(f"Unexpected error creating video record: {e}")
+                raise VideoServiceError(f"Unexpected error: {e}")
+
+    async def get_video_by_video_id(self, video_id: str) -> Optional[Video]:
+        """
+        Get video by YouTube video ID.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Video object if found, None otherwise
+        """
+        try:
+            session = await self._get_session()
+            
+            stmt = select(Video).where(Video.video_id == video_id)
+            result = await session.execute(stmt)
+            video = result.scalar_one_or_none()
+            
+            return video
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error getting video: {e}")
+            raise VideoServiceError(f"Failed to get video: {e}")
+
+    async def get_video_by_id(self, video_id: int) -> Optional[Video]:
+        """
+        Get video by database ID with all related data.
+        
+        Args:
+            video_id: Database video ID
+            
+        Returns:
+            Video object with all related data if found, None otherwise
+        """
+        try:
+            session = await self._get_session()
+            
+            stmt = select(Video).options(
+                selectinload(Video.transcripts),
+                selectinload(Video.summaries),
+                selectinload(Video.keywords),
+                selectinload(Video.timestamped_segments),
+                selectinload(Video.processing_metadata)
+            ).where(Video.id == video_id)
+            
+            result = await session.execute(stmt)
+            video = result.scalar_one_or_none()
+            
+            return video
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error getting video by ID: {e}")
+            raise VideoServiceError(f"Failed to get video by ID: {e}")
+
+    async def save_transcript(
+        self,
+        video_id: str,
+        content: str,
+        language: Optional[str] = None
+    ) -> Transcript:
+        """
+        Save transcript for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            content: Transcript content
+            language: Language code
+            
+        Returns:
+            Created Transcript object
+            
+        Raises:
+            VideoServiceError: If saving fails
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                raise VideoServiceError(f"Video {video_id} not found")
+            
+            # Create transcript record
+            transcript = Transcript(
+                video_id=video.id,
+                content=content,
+                language=language
+            )
+            
+            session.add(transcript)
+            await session.commit()
+            await session.refresh(transcript)
+            
+            self._logger.info(f"Saved transcript for video {video_id}")
+            return transcript
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error saving transcript: {e}")
+            raise VideoServiceError(f"Failed to save transcript: {e}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error saving transcript: {e}")
+            raise VideoServiceError(f"Unexpected error: {e}")
+
+    async def save_summary(
+        self,
+        video_id: str,
+        content: str,
+        processing_time: Optional[float] = None
+    ) -> Summary:
+        """
+        Save summary for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            content: Summary content
+            processing_time: Time taken to generate summary
+            
+        Returns:
+            Created Summary object
+            
+        Raises:
+            VideoServiceError: If saving fails
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                raise VideoServiceError(f"Video {video_id} not found")
+            
+            # Create summary record
+            summary = Summary(
+                video_id=video.id,
+                content=content,
+                processing_time=processing_time
+            )
+            
+            session.add(summary)
+            await session.commit()
+            await session.refresh(summary)
+            
+            self._logger.info(f"Saved summary for video {video_id}")
+            return summary
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error saving summary: {e}")
+            raise VideoServiceError(f"Failed to save summary: {e}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error saving summary: {e}")
+            raise VideoServiceError(f"Unexpected error: {e}")
+
+    async def save_keywords(
+        self,
+        video_id: str,
+        keywords_data: Dict[str, Any]
+    ) -> Keyword:
+        """
+        Save keywords for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            keywords_data: Keywords data as JSON
+            
+        Returns:
+            Created Keyword object
+            
+        Raises:
+            VideoServiceError: If saving fails
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                raise VideoServiceError(f"Video {video_id} not found")
+            
+            # Create keyword record
+            keyword = Keyword(
+                video_id=video.id,
+                keywords_json=keywords_data
+            )
+            
+            session.add(keyword)
+            await session.commit()
+            await session.refresh(keyword)
+            
+            self._logger.info(f"Saved keywords for video {video_id}")
+            return keyword
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error saving keywords: {e}")
+            raise VideoServiceError(f"Failed to save keywords: {e}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error saving keywords: {e}")
+            raise VideoServiceError(f"Unexpected error: {e}")
+
+    async def save_timestamped_segments(
+        self,
+        video_id: str,
+        segments_data: Dict[str, Any]
+    ) -> TimestampedSegment:
+        """
+        Save timestamped segments for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            segments_data: Segments data as JSON
+            
+        Returns:
+            Created TimestampedSegment object
+            
+        Raises:
+            VideoServiceError: If saving fails
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                raise VideoServiceError(f"Video {video_id} not found")
+            
+            # Create timestamped segment record
+            segment = TimestampedSegment(
+                video_id=video.id,
+                segments_json=segments_data
+            )
+            
+            session.add(segment)
+            await session.commit()
+            await session.refresh(segment)
+            
+            self._logger.info(f"Saved timestamped segments for video {video_id}")
+            return segment
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error saving segments: {e}")
+            raise VideoServiceError(f"Failed to save segments: {e}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error saving segments: {e}")
+            raise VideoServiceError(f"Unexpected error: {e}")
+
+    async def save_processing_metadata(
+        self,
+        video_id: str,
+        workflow_params: Optional[Dict[str, Any]] = None,
+        status: str = "pending",
+        error_info: Optional[str] = None
+    ) -> ProcessingMetadata:
+        """
+        Save processing metadata for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            workflow_params: Workflow parameters
+            status: Processing status
+            error_info: Error information if any
+            
+        Returns:
+            Created ProcessingMetadata object
+            
+        Raises:
+            VideoServiceError: If saving fails
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                raise VideoServiceError(f"Video {video_id} not found")
+            
+            # Create processing metadata record
+            metadata = ProcessingMetadata(
+                video_id=video.id,
+                workflow_params=workflow_params,
+                status=status,
+                error_info=error_info
+            )
+            
+            session.add(metadata)
+            await session.commit()
+            await session.refresh(metadata)
+            
+            self._logger.info(f"Saved processing metadata for video {video_id}")
+            return metadata
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error saving metadata: {e}")
+            raise VideoServiceError(f"Failed to save metadata: {e}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error saving metadata: {e}")
+            raise VideoServiceError(f"Unexpected error: {e}")
+
+    async def update_processing_status(
+        self,
+        video_id: str,
+        status: str,
+        error_info: Optional[str] = None
+    ) -> Optional[ProcessingMetadata]:
+        """
+        Update processing status for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            status: New processing status
+            error_info: Error information if any
+            
+        Returns:
+            Updated ProcessingMetadata object or None if not found
+            
+        Raises:
+            VideoServiceError: If update fails
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                raise VideoServiceError(f"Video {video_id} not found")
+            
+            # Update processing metadata
+            stmt = update(ProcessingMetadata).where(
+                ProcessingMetadata.video_id == video.id
+            ).values(
+                status=status,
+                error_info=error_info
+            )
+            
+            await session.execute(stmt)
+            await session.commit()
+            
+            # Get updated metadata
+            metadata_stmt = select(ProcessingMetadata).where(
+                ProcessingMetadata.video_id == video.id
+            ).order_by(ProcessingMetadata.created_at.desc())
+            
+            result = await session.execute(metadata_stmt)
+            metadata = result.scalar_one_or_none()
+            
+            self._logger.info(f"Updated processing status for video {video_id} to {status}")
+            return metadata
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error updating status: {e}")
+            raise VideoServiceError(f"Failed to update status: {e}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error updating status: {e}")
+            raise VideoServiceError(f"Unexpected error: {e}")
+
+    async def video_exists(self, video_id: str) -> bool:
+        """
+        Check if a video exists in the database.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            True if video exists, False otherwise
+        """
+        try:
+            video = await self.get_video_by_video_id(video_id)
+            return video is not None
+            
+        except VideoServiceError:
+            return False
+
+    async def get_processing_status(self, video_id: str) -> Optional[str]:
+        """
+        Get current processing status for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Processing status or None if not found
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                return None
+            
+            # Get latest processing metadata
+            stmt = select(ProcessingMetadata).where(
+                ProcessingMetadata.video_id == video.id
+            ).order_by(ProcessingMetadata.created_at.desc())
+            
+            result = await session.execute(stmt)
+            metadata = result.scalar_one_or_none()
+            
+            return metadata.status if metadata else None
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error getting status: {e}")
+            return None
+
+    async def delete_video_data(self, video_id: str) -> bool:
+        """
+        Delete all data for a video (cascade delete).
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            True if deletion succeeded, False otherwise
+        """
+        try:
+            session = await self._get_session()
+            
+            # Get video record
+            video = await self.get_video_by_video_id(video_id)
+            if not video:
+                self._logger.warning(f"Video {video_id} not found for deletion")
+                return False
+            
+            # Delete video (cascade will handle related records)
+            await session.delete(video)
+            await session.commit()
+            
+            self._logger.info(f"Deleted video data for {video_id}")
+            return True
+            
+        except SQLAlchemyError as e:
+            self._logger.error(f"Database error deleting video: {e}")
+            raise VideoServiceError(f"Failed to delete video: {e}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error deleting video: {e}")
+            raise VideoServiceError(f"Unexpected error: {e}")
+
+
+# Convenience function for creating video service with session
+async def create_video_service_with_session() -> VideoService:
+    """
+    Create a VideoService instance with a new database session.
+    
+    Returns:
+        VideoService instance
+    """
+    # This would typically be used in contexts where you need a standalone service
+    # In FastAPI, you'd use dependency injection instead
+    return VideoService()
+
+
+# Dependency injection function for FastAPI
+def get_video_service(session: AsyncSession) -> VideoService:
+    """
+    Get VideoService instance for dependency injection.
+    
+    Args:
+        session: Database session from FastAPI dependency
+        
+    Returns:
+        VideoService instance
+    """
+    return VideoService(session)

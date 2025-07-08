@@ -117,7 +117,8 @@ class YouTubeSummarizerFlow(Flow):
                  enable_monitoring: bool = True,
                  enable_fallbacks: bool = True,
                  max_retries: int = 2,
-                 timeout_seconds: int = 300):
+                 timeout_seconds: int = 300,
+                 video_service=None):
         """
         Initialize the YouTube summarizer workflow.
         
@@ -127,6 +128,7 @@ class YouTubeSummarizerFlow(Flow):
             enable_fallbacks: Whether to enable fallback mechanisms (legacy)
             max_retries: Maximum number of workflow retries (legacy)
             timeout_seconds: Total workflow timeout in seconds (legacy)
+            video_service: Optional video service for database persistence
         """
         super().__init__("YouTubeSummarizerFlow")
         
@@ -149,6 +151,7 @@ class YouTubeSummarizerFlow(Flow):
         self.error_handler = ErrorHandler(self.name)
         self.monitor = WorkflowMonitor(self.name) if self.enable_monitoring else None
         self.node_instances: Dict[str, Node] = {}
+        self.video_service = video_service
         
         # Initialize language detection
         self.language_detector = None
@@ -189,8 +192,19 @@ class YouTubeSummarizerFlow(Flow):
             self.store = Store()
             self.store.update(input_data)
             
+            # Check for duplicate videos and handle accordingly
+            duplicate_result = self._handle_duplicate_detection(input_data)
+            if duplicate_result:
+                return duplicate_result
+            
+            # Check database health and configure graceful degradation
+            self._configure_database_degradation()
+            
             # Execute workflow with timeout protection
             result = self._execute_workflow_with_timeout()
+            
+            # Save workflow completion metadata
+            self._save_workflow_completion_metadata(input_data, result)
             
             # Finalize monitoring
             if self.monitor:
@@ -308,8 +322,27 @@ class YouTubeSummarizerFlow(Flow):
             # Exec phase
             exec_result = node.exec(self.store, prep_result)
             
-            # Post phase
-            post_result = node.post(self.store, prep_result, exec_result)
+            # Post phase (handle async post methods)
+            import asyncio
+            import inspect
+            
+            if inspect.iscoroutinefunction(node.post):
+                # Handle async post method
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # If we're already in an async context, we need to handle this differently
+                        # For now, log a warning and use sync fallback
+                        logger.warning(f"Node {node_name} has async post method but workflow is sync. Database persistence may be skipped.")
+                        post_result = {'post_status': 'skipped', 'reason': 'async_in_sync_context', 'database_saved': False}
+                    else:
+                        post_result = loop.run_until_complete(node.post(self.store, prep_result, exec_result))
+                except RuntimeError:
+                    # No event loop, create one
+                    post_result = asyncio.run(node.post(self.store, prep_result, exec_result))
+            else:
+                # Handle sync post method
+                post_result = node.post(self.store, prep_result, exec_result)
             
             return {
                 'prep_result': prep_result,
@@ -376,6 +409,338 @@ class YouTubeSummarizerFlow(Flow):
             self.detected_language_result = fallback_result
             return fallback_result
 
+    def _handle_duplicate_detection(self, input_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Handle duplicate video detection and processing decisions.
+        
+        Args:
+            input_data: Input data containing youtube_url
+            
+        Returns:
+            Dict with existing video data if duplicate found and should not reprocess,
+            None if should proceed with processing
+        """
+        # Check if duplicate detection is enabled
+        if not self.config.duplicate_handling.enable_duplicate_detection:
+            return None
+            
+        if not self.video_service:
+            # No database service available, proceed with processing
+            return None
+        
+        try:
+            # Extract video ID from URL
+            youtube_url = input_data.get('youtube_url', '')
+            video_id = self._extract_video_id(youtube_url)
+            
+            if not video_id:
+                # Cannot extract video ID, proceed with processing
+                return None
+            
+            # Check if video exists in database
+            import asyncio
+            
+            try:
+                # Handle async/sync context
+                if hasattr(asyncio, '_get_running_loop') and asyncio._get_running_loop():
+                    # Already in async context - this shouldn't happen in current design
+                    logger.warning("Duplicate detection called in async context")
+                    return None
+                else:
+                    # Create async context for database check
+                    video_exists = asyncio.run(self.video_service.video_exists(video_id))
+            except RuntimeError:
+                # No event loop, create one
+                video_exists = asyncio.run(self.video_service.video_exists(video_id))
+            
+            if not video_exists:
+                # Video not found, proceed with processing
+                logger.info(f"Video {video_id} not found in database, proceeding with processing")
+                return None
+            
+            # Video exists - check reprocessing policy
+            reprocess_policy = self._get_reprocessing_policy(input_data)
+            
+            if reprocess_policy == 'never':
+                # Return existing data without reprocessing
+                logger.info(f"Video {video_id} exists, returning cached data (policy: never)")
+                return self._get_existing_video_data(video_id)
+            
+            elif reprocess_policy == 'always':
+                # Proceed with reprocessing
+                logger.info(f"Video {video_id} exists, reprocessing (policy: always)")
+                return None
+            
+            elif reprocess_policy == 'if_failed':
+                # Check if previous processing failed
+                processing_status = asyncio.run(self.video_service.get_processing_status(video_id))
+                if processing_status == 'failed':
+                    logger.info(f"Video {video_id} exists but failed, reprocessing (policy: if_failed)")
+                    return None
+                else:
+                    logger.info(f"Video {video_id} exists and succeeded, returning cached data (policy: if_failed)")
+                    return self._get_existing_video_data(video_id)
+            
+            else:
+                # Default: return existing data
+                logger.info(f"Video {video_id} exists, returning cached data (default policy)")
+                return self._get_existing_video_data(video_id)
+                
+        except Exception as e:
+            logger.error(f"Error in duplicate detection: {str(e)}")
+            # On error, proceed with processing
+            return None
+
+    def _extract_video_id(self, youtube_url: str) -> Optional[str]:
+        """Extract video ID from YouTube URL."""
+        import re
+        
+        # Common YouTube URL patterns
+        patterns = [
+            r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})',
+            r'youtube\.com/v/([a-zA-Z0-9_-]{11})',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, youtube_url)
+            if match:
+                return match.group(1)
+        
+        return None
+
+    def _get_reprocessing_policy(self, input_data: Dict[str, Any]) -> str:
+        """
+        Get reprocessing policy from input data or configuration.
+        
+        Returns:
+            'never' - Never reprocess existing videos
+            'always' - Always reprocess existing videos  
+            'if_failed' - Only reprocess if previous attempt failed
+        """
+        # Check input data for explicit policy override
+        policy = input_data.get('reprocess_policy')
+        if (policy in ['never', 'always', 'if_failed'] and 
+            self.config.duplicate_handling.allow_policy_override):
+            return policy
+        
+        # Use configured policy
+        return self.config.duplicate_handling.reprocess_policy
+
+    def _get_existing_video_data(self, video_id: str) -> Dict[str, Any]:
+        """
+        Retrieve existing video data from database.
+        
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            Dict containing existing video processing results
+        """
+        try:
+            import asyncio
+            
+            # Get video with all related data
+            video = asyncio.run(self.video_service.get_video_by_video_id(video_id))
+            
+            if not video:
+                logger.warning(f"Video {video_id} exists check passed but retrieval failed")
+                return None
+            
+            # Convert database models to workflow result format
+            result_data = {
+                'video_id': video.video_id,
+                'video_title': video.title,
+                'video_duration': video.duration,
+                'video_url': video.url,
+                'transcript_text': '',
+                'summary_text': '',
+                'keywords': [],
+                'timestamps': []
+            }
+            
+            # Extract transcript data
+            if video.transcripts:
+                latest_transcript = video.transcripts[-1]  # Get most recent
+                result_data['transcript_text'] = latest_transcript.content
+                result_data['transcript_language'] = latest_transcript.language
+            
+            # Extract summary data
+            if video.summaries:
+                latest_summary = video.summaries[-1]  # Get most recent
+                result_data['summary_text'] = latest_summary.content
+                result_data['summary_processing_time'] = latest_summary.processing_time
+            
+            # Extract keywords data
+            if video.keywords:
+                latest_keywords = video.keywords[-1]  # Get most recent
+                keywords_data = latest_keywords.keywords_json
+                if isinstance(keywords_data, dict):
+                    result_data['keywords'] = keywords_data.get('keywords', [])
+                elif isinstance(keywords_data, list):
+                    result_data['keywords'] = keywords_data
+            
+            # Extract timestamped segments
+            if video.timestamped_segments:
+                latest_segments = video.timestamped_segments[-1]  # Get most recent
+                segments_data = latest_segments.segments_json
+                if isinstance(segments_data, dict):
+                    result_data['timestamps'] = segments_data.get('timestamps', [])
+                elif isinstance(segments_data, list):
+                    result_data['timestamps'] = segments_data
+            
+            # Add metadata about cached result
+            result_data['cached_result'] = True
+            result_data['cached_from_database'] = True
+            result_data['processing_time'] = 0.0  # No processing time for cached result
+            
+            logger.info(f"Retrieved cached data for video {video_id}")
+            
+            return {
+                'status': 'success',
+                'data': result_data,
+                'workflow_skipped': True,
+                'reason': 'duplicate_video_cached'
+            }
+            
+        except Exception as e:
+            logger.error(f"Error retrieving existing video data for {video_id}: {str(e)}")
+            return None
+
+    def _save_workflow_completion_metadata(self, input_data: Dict[str, Any], result: Dict[str, Any]) -> None:
+        """
+        Save workflow completion metadata to database.
+        
+        Args:
+            input_data: Original workflow input data
+            result: Workflow execution result
+        """
+        if not self.video_service:
+            return
+        
+        try:
+            # Extract video ID
+            youtube_url = input_data.get('youtube_url', '')
+            video_id = self._extract_video_id(youtube_url)
+            
+            if not video_id:
+                return
+            
+            # Prepare workflow metadata
+            workflow_params = {
+                'workflow_config': {
+                    'enable_monitoring': self.config.enable_monitoring,
+                    'enable_fallbacks': self.config.enable_fallbacks,
+                    'max_retries': self.config.max_retries,
+                    'timeout_seconds': self.config.timeout_seconds,
+                    'duplicate_detection_enabled': self.config.duplicate_handling.enable_duplicate_detection,
+                    'reprocess_policy': self.config.duplicate_handling.reprocess_policy
+                },
+                'execution_details': {
+                    'start_time': input_data.get('processing_start_time'),
+                    'request_id': input_data.get('request_id'),
+                    'reprocess_policy_override': input_data.get('reprocess_policy'),
+                    'nodes_executed': list(self.node_instances.keys())
+                }
+            }
+            
+            # Determine final status
+            status = 'completed'
+            error_info = None
+            
+            if result.get('status') != 'success':
+                status = 'failed'
+                error_info = str(result.get('error', 'Unknown error'))
+            
+            # Save metadata asynchronously
+            import asyncio
+            
+            try:
+                asyncio.run(self.video_service.save_processing_metadata(
+                    video_id=video_id,
+                    workflow_params=workflow_params,
+                    status=status,
+                    error_info=error_info
+                ))
+                logger.info(f"Saved workflow completion metadata for video {video_id}")
+                
+            except RuntimeError:
+                # No event loop, create one
+                asyncio.run(self.video_service.save_processing_metadata(
+                    video_id=video_id,
+                    workflow_params=workflow_params,
+                    status=status,
+                    error_info=error_info
+                ))
+                logger.info(f"Saved workflow completion metadata for video {video_id}")
+                
+        except Exception as e:
+            logger.error(f"Error saving workflow completion metadata: {str(e)}")
+
+    def _configure_database_degradation(self) -> None:
+        """
+        Configure graceful degradation for database operations.
+        
+        Checks database health and adjusts workflow behavior accordingly.
+        """
+        if not self.video_service:
+            # No database service, workflow will run without persistence
+            logger.info("No database service available, workflow will run without persistence")
+            self.store['database_available'] = False
+            self.store['database_degraded'] = False
+            return
+        
+        try:
+            # Quick database health check
+            import asyncio
+            
+            async def check_db_health():
+                try:
+                    # Simple existence check - this should be fast
+                    await self.video_service.video_exists("test_health_check")
+                    return True
+                except Exception:
+                    return False
+            
+            try:
+                db_healthy = asyncio.run(check_db_health())
+            except RuntimeError:
+                db_healthy = asyncio.run(check_db_health())
+            
+            if db_healthy:
+                logger.info("Database health check passed, full persistence enabled")
+                self.store['database_available'] = True
+                self.store['database_degraded'] = False
+            else:
+                logger.warning("Database health check failed, enabling degraded mode")
+                self.store['database_available'] = False
+                self.store['database_degraded'] = True
+                
+                # Optionally disable database service to prevent further attempts
+                if hasattr(self, '_original_video_service'):
+                    # Already degraded
+                    pass
+                else:
+                    self._original_video_service = self.video_service
+                    self.video_service = None  # Disable database operations
+                
+        except Exception as e:
+            logger.error(f"Error during database health check: {str(e)}")
+            self.store['database_available'] = False
+            self.store['database_degraded'] = True
+            
+            # Disable database service
+            if hasattr(self, '_original_video_service'):
+                pass
+            else:
+                self._original_video_service = self.video_service
+                self.video_service = None
+
+    def _restore_database_service(self) -> None:
+        """Restore database service if it was disabled during degradation."""
+        if hasattr(self, '_original_video_service'):
+            self.video_service = self._original_video_service
+            delattr(self, '_original_video_service')
+
     def _should_execute_node(self, node_name: str) -> bool:
         """Check if a node should be executed based on configuration."""
         node_config = self.config.get_node_config(node_name)
@@ -397,11 +762,20 @@ class YouTubeSummarizerFlow(Flow):
         for node_name, node_class in node_classes.items():
             node_config = self.config.get_node_config(node_name)
             if node_config and node_config.enabled:
-                self.node_instances[node_name] = node_class(
-                    max_retries=node_config.max_retries,
-                    retry_delay=node_config.retry_delay
-                )
-                logger.debug(f"Initialized node: {node_name}")
+                # Create node with video service for database persistence
+                node_kwargs = {
+                    'max_retries': node_config.max_retries,
+                    'retry_delay': node_config.retry_delay
+                }
+                
+                # Add video_service parameter if the node supports it
+                if self.video_service and hasattr(node_class.__init__, '__code__'):
+                    init_params = node_class.__init__.__code__.co_varnames
+                    if 'video_service' in init_params:
+                        node_kwargs['video_service'] = self.video_service
+                
+                self.node_instances[node_name] = node_class(**node_kwargs)
+                logger.debug(f"Initialized node: {node_name} with database support: {self.video_service is not None}")
 
     def _initialize_circuit_breakers(self) -> None:
         """Initialize circuit breakers for nodes."""

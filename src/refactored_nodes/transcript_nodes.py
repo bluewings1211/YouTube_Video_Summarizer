@@ -12,6 +12,7 @@ from datetime import datetime
 from .validation_nodes import BaseProcessingNode, Store
 from ..utils.youtube_api import YouTubeTranscriptFetcher, YouTubeTranscriptError
 from ..utils.validators import YouTubeURLValidator
+from ..services.video_service import VideoService
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +26,14 @@ class YouTubeTranscriptNode(BaseProcessingNode):
     """
     
     def __init__(self, max_retries: int = 3, retry_delay: float = 1.0, 
-                 enable_enhanced_acquisition: bool = True, enable_detailed_logging: bool = True):
+                 enable_enhanced_acquisition: bool = True, enable_detailed_logging: bool = True,
+                 video_service: Optional[VideoService] = None):
         super().__init__("YouTubeTranscriptNode", max_retries, retry_delay)
         self.transcript_fetcher = YouTubeTranscriptFetcher(
             enable_detailed_logging=enable_detailed_logging
         )
         self.enable_enhanced_acquisition = enable_enhanced_acquisition
+        self.video_service = video_service
     
     def prep(self, store: Store) -> Dict[str, Any]:
         """
@@ -198,7 +201,7 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             
             return exec_result
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    async def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process transcript data and update store.
         
@@ -243,8 +246,38 @@ class YouTubeTranscriptNode(BaseProcessingNode):
                 'transcript_duration': transcript_data.get('duration', 0),
                 'processing_time_seconds': processing_time,
                 'store_updated': True,
-                'post_timestamp': datetime.utcnow().isoformat()
+                'post_timestamp': datetime.utcnow().isoformat(),
+                'database_saved': False
             }
+            
+            # Save transcript to database if video service is available
+            if self.video_service:
+                try:
+                    video_id = prep_result.get('video_id')
+                    transcript_content = transcript_data.get('full_text', '')
+                    language = transcript_data.get('language', 'en')
+                    
+                    # Create video record if it doesn't exist
+                    await self.video_service.create_video_record(
+                        video_id=video_id,
+                        title=video_metadata.get('title', 'Unknown Title'),
+                        duration=video_metadata.get('duration', 0),
+                        url=f"https://www.youtube.com/watch?v={video_id}"
+                    )
+                    
+                    # Save transcript
+                    await self.video_service.save_transcript(
+                        video_id=video_id,
+                        content=transcript_content,
+                        language=language
+                    )
+                    
+                    post_result['database_saved'] = True
+                    self.logger.info(f"Transcript saved to database for video: {video_id}")
+                    
+                except Exception as db_error:
+                    self.logger.error(f"Failed to save transcript to database: {str(db_error)}")
+                    post_result['database_error'] = str(db_error)
             
             self.logger.info(f"Transcript post-processing successful")
             return post_result

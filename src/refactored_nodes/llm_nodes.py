@@ -12,6 +12,7 @@ from datetime import datetime
 
 from .validation_nodes import BaseProcessingNode, Store
 from ..utils.smart_llm_client import SmartLLMClient, TaskRequirements, detect_task_requirements
+from ..services.video_service import VideoService
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,11 @@ class SummarizationNode(BaseProcessingNode):
     of approximately 500 words using configured LLM providers.
     """
     
-    def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
+    def __init__(self, max_retries: int = 3, retry_delay: float = 2.0, video_service: Optional[VideoService] = None):
         super().__init__("SummarizationNode", max_retries, retry_delay)
         self.smart_llm_client = None
         self.target_word_count = 500
+        self.video_service = video_service
     
     def prep(self, store: Store) -> Dict[str, Any]:
         """
@@ -207,7 +209,7 @@ class SummarizationNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    async def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process summary and update store.
         
@@ -282,8 +284,28 @@ class SummarizationNode(BaseProcessingNode):
                 'video_id': video_id,
                 'video_title': video_title,
                 'compression_ratio': exec_result['compression_ratio'],
-                'post_timestamp': datetime.utcnow().isoformat()
+                'post_timestamp': datetime.utcnow().isoformat(),
+                'database_saved': False
             }
+            
+            # Save summary to database if video service is available
+            if self.video_service:
+                try:
+                    processing_time = exec_result.get('processing_duration', 0)
+                    
+                    # Save summary
+                    await self.video_service.save_summary(
+                        video_id=video_id,
+                        content=summary_text,
+                        processing_time=processing_time
+                    )
+                    
+                    post_result['database_saved'] = True
+                    self.logger.info(f"Summary saved to database for video: {video_id}")
+                    
+                except Exception as db_error:
+                    self.logger.error(f"Failed to save summary to database: {str(db_error)}")
+                    post_result['database_error'] = str(db_error)
             
             self.logger.info(f"Summary post-processing successful for video {video_id}")
             return post_result
@@ -346,10 +368,11 @@ class KeywordExtractionNode(BaseProcessingNode):
     keywords that best represent the video content for categorization and search.
     """
     
-    def __init__(self, max_retries: int = 3, retry_delay: float = 1.5):
+    def __init__(self, max_retries: int = 3, retry_delay: float = 1.5, video_service: Optional[VideoService] = None):
         super().__init__("KeywordExtractionNode", max_retries, retry_delay)
         self.smart_llm_client = None
         self.default_keyword_count = 6  # Middle of 5-8 range
+        self.video_service = video_service
     
     def prep(self, store: Store) -> Dict[str, Any]:
         """
@@ -532,7 +555,7 @@ class KeywordExtractionNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    async def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process keywords and update store.
         
@@ -606,8 +629,29 @@ class KeywordExtractionNode(BaseProcessingNode):
                 'keyword_count': keyword_count,
                 'video_id': video_id,
                 'video_title': video_title,
-                'post_timestamp': datetime.utcnow().isoformat()
+                'post_timestamp': datetime.utcnow().isoformat(),
+                'database_saved': False
             }
+            
+            # Save keywords to database if video service is available
+            if self.video_service:
+                try:
+                    # Save keywords data as JSON
+                    await self.video_service.save_keywords(
+                        video_id=video_id,
+                        keywords_data={
+                            'keywords': keywords,
+                            'count': keyword_count,
+                            'extracted_at': exec_result.get('exec_timestamp')
+                        }
+                    )
+                    
+                    post_result['database_saved'] = True
+                    self.logger.info(f"Keywords saved to database for video: {video_id}")
+                    
+                except Exception as db_error:
+                    self.logger.error(f"Failed to save keywords to database: {str(db_error)}")
+                    post_result['database_error'] = str(db_error)
             
             self.logger.info(f"Keywords post-processing successful for video {video_id}")
             return post_result

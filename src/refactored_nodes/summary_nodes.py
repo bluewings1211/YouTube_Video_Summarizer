@@ -12,6 +12,7 @@ from datetime import datetime
 
 from .validation_nodes import BaseProcessingNode, Store
 from ..utils.smart_llm_client import SmartLLMClient, TaskRequirements, detect_task_requirements
+from ..services.video_service import VideoService
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,11 @@ class TimestampNode(BaseProcessingNode):
     timestamped YouTube URLs with AI-generated descriptions and importance ratings.
     """
     
-    def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
+    def __init__(self, max_retries: int = 3, retry_delay: float = 2.0, video_service: Optional[VideoService] = None):
         super().__init__("TimestampNode", max_retries, retry_delay)
         self.smart_llm_client = None
         self.default_timestamp_count = 5
+        self.video_service = video_service
     
     def prep(self, store: Store) -> Dict[str, Any]:
         """
@@ -214,7 +216,7 @@ class TimestampNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    async def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process timestamps and update store.
         
@@ -292,8 +294,34 @@ class TimestampNode(BaseProcessingNode):
                 'avg_importance_rating': round(sum(t.get('importance_rating', 0) for t in timestamps) / len(timestamps), 2),
                 'video_id': video_id,
                 'video_title': video_title,
-                'post_timestamp': datetime.utcnow().isoformat()
+                'post_timestamp': datetime.utcnow().isoformat(),
+                'database_saved': False
             }
+            
+            # Save timestamped segments to database if video service is available
+            if self.video_service:
+                try:
+                    # Save timestamped segments data as JSON
+                    await self.video_service.save_timestamped_segments(
+                        video_id=video_id,
+                        segments_data={
+                            'timestamps': timestamps,
+                            'sorted_by_importance': sorted_timestamps,
+                            'high_importance': high_importance,
+                            'medium_importance': medium_importance,
+                            'low_importance': low_importance,
+                            'count': len(timestamps),
+                            'stats': exec_result['timestamp_stats'],
+                            'generated_at': exec_result['exec_timestamp']
+                        }
+                    )
+                    
+                    post_result['database_saved'] = True
+                    self.logger.info(f"Timestamped segments saved to database for video: {video_id}")
+                    
+                except Exception as db_error:
+                    self.logger.error(f"Failed to save timestamped segments to database: {str(db_error)}")
+                    post_result['database_error'] = str(db_error)
             
             self.logger.info(f"Timestamp post-processing successful for video {video_id}")
             return post_result
