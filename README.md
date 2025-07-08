@@ -20,9 +20,8 @@ A comprehensive web service that automatically extracts, summarizes, and analyze
 
 ### Prerequisites
 
-- Python 3.11+
-- Docker and Docker Compose
-- PostgreSQL 15+ (or use Docker Compose)
+- Python 3.11+ (for local development)
+- Docker and Docker Compose (required)
 - OpenAI or Anthropic API key
 
 ### 🚀 Quick Setup (5 minutes)
@@ -91,109 +90,33 @@ PORT=8000
 HOST=0.0.0.0
 ```
 
-### 3. Database Setup
+### 3. Start the Services
 
-#### Option A: Using Docker Compose (Recommended)
+All external dependencies (PostgreSQL, Redis) are managed through Docker Compose:
 
 ```bash
-# Start PostgreSQL service first
-docker-compose up -d postgres
+# Start all services (PostgreSQL + Redis + App)
+docker-compose up -d
 
-# Wait for database to be ready (check logs)
-docker-compose logs postgres
+# Wait for services to be ready (check logs)
+docker-compose logs
 
 # Run database migrations
-alembic upgrade head
+docker-compose exec app alembic upgrade head
 
-# Verify database setup
-curl http://localhost:8000/health/database
-```
-
-#### Option B: Manual PostgreSQL Installation
-
-**macOS (using Homebrew):**
-```bash
-# Install PostgreSQL
-brew install postgresql@15
-
-# Start PostgreSQL service
-brew services start postgresql@15
-
-# Create database and user
-createdb youtube_summarizer
-psql postgres -c "CREATE USER youtube_user WITH PASSWORD 'your_password';"
-psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE youtube_summarizer TO youtube_user;"
-
-# Update .env with your database credentials
-# DATABASE_URL=postgresql+asyncpg://youtube_user:your_password@localhost:5432/youtube_summarizer
-```
-
-**Ubuntu/Debian:**
-```bash
-# Install PostgreSQL
-sudo apt update
-sudo apt install postgresql-15 postgresql-contrib
-
-# Start PostgreSQL service
-sudo systemctl start postgresql
-sudo systemctl enable postgresql
-
-# Create database and user
-sudo -u postgres createdb youtube_summarizer
-sudo -u postgres psql -c "CREATE USER youtube_user WITH PASSWORD 'your_password';"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE youtube_summarizer TO youtube_user;"
-
-# Update .env with your database credentials
-```
-
-**Windows:**
-```bash
-# Download and install PostgreSQL from https://www.postgresql.org/download/windows/
-# Use pgAdmin or psql command line:
-
-# Create database and user
-psql -U postgres -c "CREATE DATABASE youtube_summarizer;"
-psql -U postgres -c "CREATE USER youtube_user WITH PASSWORD 'your_password';"
-psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE youtube_summarizer TO youtube_user;"
-
-# Update .env with your database credentials
-```
-
-#### Run Database Migrations
-
-After setting up PostgreSQL, run the database migrations:
-
-```bash
-# Check migration status
-alembic current
-
-# Run all pending migrations
-alembic upgrade head
-
-# Verify database tables were created
-psql -U youtube_user -d youtube_summarizer -c "\dt"
-```
-
-### 4. Start the Service
-
-#### Using Docker Compose (Recommended)
-
-```bash
-# Build and start all services (including PostgreSQL)
-make build
-make up
-
-# View logs
-make logs
-
-# Check service health
+# Verify all services are healthy
 curl http://localhost:8000/health
 curl http://localhost:8000/health/database
 ```
 
-#### Using Python Virtual Environment
+### 4. Alternative: Development with Python Virtual Environment
+
+For development without Docker (requires Docker Compose for PostgreSQL/Redis):
 
 ```bash
+# Start only external services
+docker-compose up -d postgres redis
+
 # Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -631,15 +554,19 @@ Structured JSON logging with:
 5. **Database Connection Error**
    ```
    Error: Connection to database failed
-   Solution: Check PostgreSQL is running and DATABASE_URL is correct
+   Solution: Check PostgreSQL container is running
    
-   # Check PostgreSQL status
-   # macOS: brew services list | grep postgresql
-   # Ubuntu: sudo systemctl status postgresql
-   # Windows: Check Services in Task Manager
+   # Check container status
+   docker-compose ps postgres
+   
+   # Check PostgreSQL logs
+   docker-compose logs postgres
+   
+   # Restart PostgreSQL service
+   docker-compose restart postgres
    
    # Test database connection
-   psql $DATABASE_URL -c "SELECT 1;"
+   docker-compose exec postgres psql -U postgres -d youtube_summarizer -c "SELECT 1;"
    ```
 
 6. **Migration Errors**
@@ -648,14 +575,14 @@ Structured JSON logging with:
    Solution: Reset and rerun migrations
    
    # Check current migration
-   alembic current
+   docker-compose exec app alembic current
    
    # Reset to base (WARNING: This will drop all data)
-   alembic downgrade base
-   alembic upgrade head
+   docker-compose exec app alembic downgrade base
+   docker-compose exec app alembic upgrade head
    
    # Or create new migration for schema fixes
-   alembic revision --autogenerate -m "Fix schema"
+   docker-compose exec app alembic revision --autogenerate -m "Fix schema"
    ```
 
 ### Debug Mode
@@ -671,14 +598,30 @@ LOG_LEVEL=debug
 ### Container Troubleshooting
 
 ```bash
-# Check container logs
+# Check all container statuses
+docker-compose ps
+
+# Check logs for all services
+docker-compose logs
+
+# Check logs for specific service
 docker-compose logs app
+docker-compose logs postgres
+docker-compose logs redis
 
 # Access container shell
 docker-compose exec app bash
+docker-compose exec postgres psql -U postgres -d youtube_summarizer
+
+# Restart all services
+docker-compose restart
+
+# Restart specific service
+docker-compose restart postgres
 
 # Check service health
 curl http://localhost:8000/health
+curl http://localhost:8000/health/database
 ```
 
 ## Contributing
