@@ -1,6 +1,6 @@
 # YouTube Video Summarizer Web Service
 
-A comprehensive web service that automatically extracts, summarizes, and analyzes YouTube video content using intelligent workflow orchestration. Built with FastAPI, PocketFlow, and modern AI/LLM integration.
+A comprehensive web service that automatically extracts, summarizes, and analyzes YouTube video content using intelligent workflow orchestration. Built with FastAPI, PocketFlow, PostgreSQL, and modern AI/LLM integration.
 
 ## Features
 
@@ -9,8 +9,11 @@ A comprehensive web service that automatically extracts, summarizes, and analyze
 - **Timestamped Navigation**: Creates clickable URLs with timestamps for key video segments
 - **Keyword Extraction**: Identifies 5-8 relevant keywords for content categorization
 - **Multi-language Support**: Handles Chinese and English video content
+- **Database Integration**: PostgreSQL-backed persistent storage for all processed videos
+- **History APIs**: RESTful endpoints for querying and filtering processed video history
+- **Duplicate Detection**: Intelligent handling of previously processed videos
 - **Real-time Processing**: Fast API responses with comprehensive error handling
-- **Containerized Deployment**: Full Docker and Docker Compose support
+- **Containerized Deployment**: Full Docker and Docker Compose support with PostgreSQL
 - **Comprehensive Testing**: 90%+ test coverage with unit and integration tests
 
 ## Quick Start
@@ -19,6 +22,7 @@ A comprehensive web service that automatically extracts, summarizes, and analyze
 
 - Python 3.11+
 - Docker and Docker Compose
+- PostgreSQL 15+ (or use Docker Compose)
 - OpenAI or Anthropic API key
 
 ### 1. Clone and Setup
@@ -41,6 +45,14 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 DEFAULT_LLM_PROVIDER=openai  # or 'anthropic'
 OPENAI_MODEL=gpt-4-turbo-preview
 ANTHROPIC_MODEL=claude-3-sonnet-20240229
+
+# Database Configuration
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/youtube_summarizer
+POSTGRES_DB=youtube_summarizer
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=password
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
 
 # Application Settings
 ENVIRONMENT=development
@@ -79,6 +91,9 @@ pip install -r requirements.txt
 # Set Python path
 export PYTHONPATH=$PWD/src
 
+# Run database migrations
+alembic upgrade head
+
 # Run the application
 python -m uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
 ```
@@ -97,7 +112,9 @@ curl -X POST "http://localhost:8000/api/v1/summarize" \
 
 ## API Documentation
 
-### Endpoint: POST /api/v1/summarize
+### Video Processing API
+
+#### Endpoint: POST /api/v1/summarize
 
 Processes a YouTube video URL and returns comprehensive analysis including summary, keywords, and timestamped segments.
 
@@ -140,7 +157,91 @@ Processes a YouTube video URL and returns comprehensive analysis including summa
 ### Additional Endpoints
 
 - **GET /health**: Service health check
+- **GET /health/database**: Database connectivity check
 - **GET /**: API information and documentation
+- **GET /api/v1/history/videos**: List processed videos with pagination and filtering
+- **GET /api/v1/history/videos/{video_id}**: Get detailed information for a specific video
+- **GET /api/v1/history/statistics**: Get processing statistics
+
+### History API
+
+#### Endpoint: GET /api/v1/history/videos
+
+Lists all processed videos with pagination and filtering capabilities.
+
+**Query Parameters:**
+- `page` (int): Page number (default: 1)
+- `page_size` (int): Items per page, 1-100 (default: 20)
+- `sort_by` (str): Sort field - "created_at", "title", "duration" (default: "created_at")
+- `sort_order` (str): "asc" or "desc" (default: "desc")
+- `date_from` (str): Filter videos from date (ISO format)
+- `date_to` (str): Filter videos to date (ISO format)
+- `keywords` (str): Filter by keywords (comma-separated)
+- `title_search` (str): Search in video titles
+
+**Example Response:**
+```json
+{
+  "videos": [
+    {
+      "id": "uuid",
+      "video_id": "dQw4w9WgXcQ",
+      "title": "Video Title",
+      "duration": "PT25M30S",
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "created_at": "2024-07-08T10:30:00Z",
+      "summary_preview": "First 100 characters of summary...",
+      "keywords": ["keyword1", "keyword2"]
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total_items": 150,
+    "total_pages": 8,
+    "has_next": true,
+    "has_prev": false
+  }
+}
+```
+
+#### Endpoint: GET /api/v1/history/videos/{video_id}
+
+Retrieves detailed information for a specific processed video.
+
+**Example Response:**
+```json
+{
+  "id": "uuid",
+  "video_id": "dQw4w9WgXcQ",
+  "title": "Complete Video Title",
+  "duration": "PT25M30S",
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "created_at": "2024-07-08T10:30:00Z",
+  "transcript": {
+    "content": "Full transcript text...",
+    "language": "en"
+  },
+  "summary": {
+    "content": "Complete 500-word summary...",
+    "processing_time": 2.5
+  },
+  "keywords": ["keyword1", "keyword2", "keyword3"],
+  "timestamped_segments": [
+    {
+      "timestamp": "00:01:30",
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s",
+      "description": "Introduction to key concept",
+      "importance_rating": 8
+    }
+  ],
+  "processing_metadata": {
+    "workflow_params": {},
+    "status": "completed",
+    "error_info": null
+  }
+}
+```
 
 ## Development
 
@@ -150,18 +251,57 @@ Processes a YouTube video URL and returns comprehensive analysis including summa
 youtube-summarizer-wave/
 ├── src/                    # Source code
 │   ├── app.py             # FastAPI application
-│   ├── flow.py            # PocketFlow workflow orchestration
-│   ├── nodes.py           # Processing nodes (transcript, summarization, etc.)
 │   ├── config.py          # Configuration management
-│   └── utils/             # Utility modules
+│   ├── database/          # Database layer
+│   │   ├── __init__.py    # Database package init
+│   │   ├── models.py      # SQLAlchemy database models
+│   │   ├── connection.py  # Database connection management
+│   │   ├── exceptions.py  # Database exception classes
+│   │   ├── monitor.py     # Database monitoring and health checks
+│   │   └── maintenance.py # Database maintenance utilities
+│   ├── services/          # Business logic layer
+│   │   ├── __init__.py    # Services package init
+│   │   ├── video_service.py # Video processing service
+│   │   └── history_service.py # History query service
+│   ├── api/               # API endpoints
+│   │   ├── __init__.py    # API package init
+│   │   └── history.py     # History API endpoints
+│   ├── refactored_nodes/  # Refactored processing nodes
+│   │   ├── __init__.py    # Nodes package init
+│   │   ├── transcript_nodes.py # YouTube transcript nodes
+│   │   ├── llm_nodes.py   # LLM processing nodes
+│   │   ├── validation_nodes.py # Validation nodes
+│   │   ├── summary_nodes.py # Summary generation nodes
+│   │   └── keyword_nodes.py # Keyword extraction nodes
+│   ├── refactored_flow/   # Refactored workflow orchestration
+│   │   ├── __init__.py    # Flow package init
+│   │   ├── orchestrator.py # Workflow orchestration
+│   │   ├── config.py      # Flow configuration
+│   │   ├── error_handler.py # Error handling
+│   │   └── monitoring.py  # Flow monitoring
+│   ├── refactored_utils/  # Refactored utility modules
+│   │   ├── __init__.py    # Utils package init
+│   │   ├── transcript_fetcher.py # Transcript fetching
+│   │   ├── video_metadata.py # Video metadata
+│   │   ├── url_validator.py # URL validation
+│   │   ├── language_handler.py # Language detection
+│   │   └── youtube_errors.py # YouTube error handling
+│   └── utils/             # Legacy utility modules (being refactored)
 │       ├── youtube_api.py # YouTube API integration
 │       ├── call_llm.py    # LLM client
 │       ├── validators.py  # Input validation
 │       └── error_messages.py # Error handling
+├── alembic/               # Database migrations
+│   ├── versions/          # Migration versions
+│   └── env.py            # Alembic environment
+├── scripts/               # Utility scripts
+│   ├── manage_migrations.py # Migration management
+│   └── database_maintenance.py # Database maintenance CLI
 ├── tests/                 # Test suites
 ├── requirements.txt       # Python dependencies
+├── alembic.ini           # Database migration configuration
 ├── Dockerfile            # Container configuration
-├── docker-compose.yml    # Multi-service setup
+├── docker-compose.yml    # Multi-service setup with PostgreSQL
 └── Makefile             # Development commands
 ```
 
@@ -179,6 +319,12 @@ make lint
 
 # Format code
 make format
+
+# Run database migrations
+make migrate
+
+# Create new migration
+make migration
 
 # View logs
 make logs
@@ -207,6 +353,12 @@ pytest tests/test_app.py
 
 # Run integration tests
 pytest tests/test_integration_e2e.py
+
+# Run database tests
+pytest tests/test_database.py
+
+# Run history API tests
+pytest tests/test_history_api.py
 ```
 
 ### Code Quality
@@ -229,6 +381,23 @@ The service uses PocketFlow for workflow orchestration with the following proces
 2. **SummarizationNode**: Generates AI-powered summaries
 3. **TimestampNode**: Creates timestamped segments with importance ratings
 4. **KeywordExtractionNode**: Extracts relevant keywords
+
+### Database Architecture
+
+**PostgreSQL Database Schema:**
+- **Videos**: Core video information (ID, title, duration, URL)
+- **Transcripts**: Video transcripts with language detection
+- **Summaries**: AI-generated summaries with processing metadata
+- **Keywords**: Extracted keywords in JSON format
+- **TimestampedSegments**: Timestamped video segments with importance ratings
+- **ProcessingMetadata**: Workflow execution metadata and error tracking
+
+**Key Features:**
+- Async SQLAlchemy 2.0+ models with validation
+- Automatic duplicate detection and handling
+- Connection pooling and health monitoring
+- Database migration system with Alembic
+- Comprehensive error handling and recovery
 
 ### LLM Integration
 
@@ -270,6 +439,12 @@ docker run -d \
 |----------|-------------|----------|---------|
 | `OPENAI_API_KEY` | OpenAI API key | Yes* | - |
 | `ANTHROPIC_API_KEY` | Anthropic API key | Yes* | - |
+| `DATABASE_URL` | PostgreSQL connection URL | Yes | - |
+| `POSTGRES_DB` | Database name | No | `youtube_summarizer` |
+| `POSTGRES_USER` | Database user | No | `postgres` |
+| `POSTGRES_PASSWORD` | Database password | No | `password` |
+| `POSTGRES_HOST` | Database host | No | `localhost` |
+| `POSTGRES_PORT` | Database port | No | `5432` |
 | `DEFAULT_LLM_PROVIDER` | LLM provider to use | No | `openai` |
 | `ENVIRONMENT` | Environment (dev/prod) | No | `development` |
 | `PORT` | Server port | No | `8000` |
@@ -281,9 +456,11 @@ docker run -d \
 ### Performance Tuning
 
 - **Concurrent Processing**: FastAPI with async/await support
+- **Database Connection Pooling**: Optimized PostgreSQL connections
 - **Caching**: Redis integration for transcript caching
 - **Resource Limits**: Configurable timeouts and retry policies
-- **Health Checks**: Built-in health monitoring endpoints
+- **Health Checks**: Built-in health monitoring endpoints for app and database
+- **Duplicate Detection**: Avoid reprocessing previously analyzed videos
 
 ## Monitoring and Logging
 
@@ -299,8 +476,16 @@ Structured JSON logging with:
 ### Health Checks
 
 - **Application Health**: `/health` endpoint
+- **Database Health**: `/health/database` endpoint with connection pool metrics
 - **Container Health**: Docker healthcheck integration
 - **Dependency Health**: LLM API and YouTube API status
+
+### Database Monitoring
+
+- **Connection Pool Metrics**: Active/idle connection tracking
+- **Query Performance**: Response time monitoring
+- **Error Tracking**: Database exception logging and alerting
+- **Maintenance Tools**: Automated cleanup and statistics
 
 ## Troubleshooting
 
