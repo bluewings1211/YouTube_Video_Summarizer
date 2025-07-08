@@ -1,0 +1,182 @@
+## Relevant Files
+
+- `src/database/__init__.py` - Database initialization and connection management
+- `src/database/models.py` - SQLAlchemy database models for videos, transcripts, summaries
+- `src/database/connection.py` - Database connection configuration and session management
+- `src/database/migrations/` - Database migration files
+- `src/api/history.py` - History API endpoints implementation
+- `src/api/__init__.py` - API module initialization
+- `src/services/video_service.py` - Video processing service with database integration
+- `src/services/history_service.py` - History query service
+- `src/refactored_nodes/` - Refactored node modules from original nodes.py
+- `src/refactored_flow/` - Refactored flow modules from original flow.py
+- `src/refactored_utils/` - Refactored utility modules from original youtube_api.py
+- `tests/test_database.py` - Database functionality tests
+- `tests/test_history_api.py` - History API endpoint tests
+- `tests/test_video_service.py` - Video service tests
+- `requirements.txt` - Updated dependencies including PostgreSQL drivers
+- `alembic.ini` - Database migration configuration
+- `docker-compose.yml` - PostgreSQL database setup for development
+
+### Notes
+
+- Database tests require PostgreSQL test instance setup
+- Use `pytest` for running all tests
+- Database migrations managed through Alembic
+- Follow existing FastAPI patterns for new endpoints
+
+## Tasks
+
+- [ ] 1.0 Database Setup & Schema Design
+  - [ ] 1.1 Install PostgreSQL dependencies and create database configuration
+    - [ ] 1.1.1 Add asyncpg, SQLAlchemy, and Alembic to requirements.txt
+    - [ ] 1.1.2 Create PostgreSQL database configuration in src/config.py
+    - [ ] 1.1.3 Set up environment variables for database connection
+    - [ ] 1.1.4 Create docker-compose.yml for local PostgreSQL development
+  - [ ] 1.2 Create SQLAlchemy database models
+    - [ ] 1.2.1 Create src/database/models.py with Video model (id, video_id, title, duration, url, created_at, updated_at)
+    - [ ] 1.2.2 Add Transcript model (id, video_id, content, language, created_at)
+    - [ ] 1.2.3 Add Summary model (id, video_id, content, processing_time, created_at)
+    - [ ] 1.2.4 Add Keyword model (id, video_id, keywords_json, created_at)
+    - [ ] 1.2.5 Add TimestampedSegment model (id, video_id, segments_json, created_at)
+    - [ ] 1.2.6 Add ProcessingMetadata model (id, video_id, workflow_params, status, error_info, created_at)
+  - [ ] 1.3 Set up database migration system
+    - [ ] 1.3.1 Initialize Alembic with alembic init command
+    - [ ] 1.3.2 Configure alembic.ini with database connection settings
+    - [ ] 1.3.3 Create initial migration for all database models
+    - [ ] 1.3.4 Test migration up/down functionality
+  - [ ] 1.4 Create database connection management
+    - [ ] 1.4.1 Create src/database/connection.py with async database session factory
+    - [ ] 1.4.2 Implement connection pooling configuration
+    - [ ] 1.4.3 Create database initialization function
+    - [ ] 1.4.4 Add database health check functionality
+  - [ ] 1.5 Integrate database with existing application
+    - [ ] 1.5.1 Add database configuration to src/config.py settings
+    - [ ] 1.5.2 Initialize database connection in FastAPI lifespan
+    - [ ] 1.5.3 Create database dependency injection for endpoints
+    - [ ] 1.5.4 Add database connection to application startup/shutdown
+- [ ] 2.0 Code Refactoring for Maintainability
+  - [ ] 2.1 Refactor src/nodes.py (1892 lines) into focused modules
+    - [ ] 2.1.1 Create src/refactored_nodes/__init__.py
+    - [ ] 2.1.2 Extract YouTube transcript nodes into src/refactored_nodes/transcript_nodes.py
+    - [ ] 2.1.3 Extract LLM processing nodes into src/refactored_nodes/llm_nodes.py
+    - [ ] 2.1.4 Extract validation nodes into src/refactored_nodes/validation_nodes.py
+    - [ ] 2.1.5 Extract summary nodes into src/refactored_nodes/summary_nodes.py
+    - [ ] 2.1.6 Extract keyword extraction nodes into src/refactored_nodes/keyword_nodes.py
+    - [ ] 2.1.7 Update imports to use refactored modules
+  - [ ] 2.2 Refactor src/flow.py (2278 lines) into manageable components
+    - [ ] 2.2.1 Create src/refactored_flow/__init__.py
+    - [ ] 2.2.2 Extract workflow orchestration into src/refactored_flow/orchestrator.py
+    - [ ] 2.2.3 Extract flow configuration into src/refactored_flow/config.py
+    - [ ] 2.2.4 Extract error handling into src/refactored_flow/error_handler.py
+    - [ ] 2.2.5 Extract monitoring into src/refactored_flow/monitoring.py
+    - [ ] 2.2.6 Create main flow class that combines refactored components
+    - [ ] 2.2.7 Update src/app.py to use refactored flow
+  - [ ] 2.3 Refactor src/utils/youtube_api.py (3118 lines) into focused utilities
+    - [ ] 2.3.1 Create src/refactored_utils/__init__.py
+    - [ ] 2.3.2 Extract transcript fetching into src/refactored_utils/transcript_fetcher.py
+    - [ ] 2.3.3 Extract video metadata into src/refactored_utils/video_metadata.py
+    - [ ] 2.3.4 Extract URL validation into src/refactored_utils/url_validator.py
+    - [ ] 2.3.5 Extract language detection into src/refactored_utils/language_handler.py
+    - [ ] 2.3.6 Extract error handling into src/refactored_utils/youtube_errors.py
+    - [ ] 2.3.7 Create unified YouTube API client that uses refactored components
+  - [ ] 2.4 Update imports and maintain PocketFlow patterns
+    - [ ] 2.4.1 Update all import statements in refactored modules
+    - [ ] 2.4.2 Ensure PocketFlow Node patterns are preserved
+    - [ ] 2.4.3 Verify workflow execution patterns remain intact
+    - [ ] 2.4.4 Update existing tests to use refactored modules
+  - [ ] 2.5 Create comprehensive tests for refactored modules
+    - [ ] 2.5.1 Create tests/test_refactored_nodes.py
+    - [ ] 2.5.2 Create tests/test_refactored_flow.py
+    - [ ] 2.5.3 Create tests/test_refactored_utils.py
+    - [ ] 2.5.4 Verify test coverage meets existing standards
+- [ ] 3.0 Database Integration with Existing Workflow
+  - [ ] 3.1 Create video processing service with database persistence
+    - [ ] 3.1.1 Create src/services/video_service.py with VideoService class
+    - [ ] 3.1.2 Implement create_video_record method
+    - [ ] 3.1.3 Implement save_transcript method
+    - [ ] 3.1.4 Implement save_summary method
+    - [ ] 3.1.5 Implement save_keywords method
+    - [ ] 3.1.6 Implement save_timestamped_segments method
+    - [ ] 3.1.7 Implement save_processing_metadata method
+  - [ ] 3.2 Modify existing workflow to save processing results
+    - [ ] 3.2.1 Add database service injection to workflow nodes
+    - [ ] 3.2.2 Modify transcript node to save transcript to database
+    - [ ] 3.2.3 Modify summary node to save summary to database
+    - [ ] 3.2.4 Modify keyword node to save keywords to database
+    - [ ] 3.2.5 Modify timestamp node to save segments to database
+    - [ ] 3.2.6 Add workflow completion handler to save metadata
+  - [ ] 3.3 Implement duplicate detection and handling
+    - [ ] 3.3.1 Create video_exists check in VideoService
+    - [ ] 3.3.2 Add duplicate detection logic to workflow start
+    - [ ] 3.3.3 Implement reprocessing decision logic
+    - [ ] 3.3.4 Add configuration for duplicate handling behavior
+  - [ ] 3.4 Add error handling for database operations
+    - [ ] 3.4.1 Create database exception classes
+    - [ ] 3.4.2 Add try/catch blocks for database operations in workflow
+    - [ ] 3.4.3 Implement graceful degradation when database is unavailable
+    - [ ] 3.4.4 Add database error logging and monitoring
+  - [ ] 3.5 Create database cleanup and maintenance utilities
+    - [ ] 3.5.1 Create src/database/maintenance.py
+    - [ ] 3.5.2 Implement cleanup_old_records function
+    - [ ] 3.5.3 Implement database health check function
+    - [ ] 3.5.4 Create maintenance CLI commands
+- [ ] 4.0 History APIs Development
+  - [ ] 4.1 Create history service for querying processed videos
+    - [ ] 4.1.1 Create src/services/history_service.py with HistoryService class
+    - [ ] 4.1.2 Implement get_videos_paginated method
+    - [ ] 4.1.3 Implement get_video_by_id method
+    - [ ] 4.1.4 Implement search_videos method
+    - [ ] 4.1.5 Implement filter_videos_by_date method
+    - [ ] 4.1.6 Create pagination helper functions
+  - [ ] 4.2 Implement GET /api/v1/history/videos endpoint
+    - [ ] 4.2.1 Create src/api/history.py with FastAPI router
+    - [ ] 4.2.2 Create Pydantic models for history responses
+    - [ ] 4.2.3 Implement paginated video list endpoint
+    - [ ] 4.2.4 Add query parameters for page, page_size, sort_by
+    - [ ] 4.2.5 Add response models with pagination metadata
+  - [ ] 4.3 Add filtering capabilities
+    - [ ] 4.3.1 Add date_from and date_to query parameters
+    - [ ] 4.3.2 Add keywords filter query parameter
+    - [ ] 4.3.3 Add title_search query parameter
+    - [ ] 4.3.4 Implement combined filtering logic
+    - [ ] 4.3.5 Add validation for filter parameters
+  - [ ] 4.4 Implement GET /api/v1/history/videos/{video_id} endpoint
+    - [ ] 4.4.1 Create detailed video response model
+    - [ ] 4.4.2 Implement video detail endpoint
+    - [ ] 4.4.3 Include all related data (transcript, summary, keywords, segments)
+    - [ ] 4.4.4 Add proper 404 handling for non-existent videos
+  - [ ] 4.5 Add comprehensive error handling and validation
+    - [ ] 4.5.1 Create history-specific error responses
+    - [ ] 4.5.2 Add input validation for all query parameters
+    - [ ] 4.5.3 Implement proper HTTP status codes
+    - [ ] 4.5.4 Add request logging for history endpoints
+    - [ ] 4.5.5 Register history router with main FastAPI app
+- [ ] 5.0 Testing & Documentation
+  - [ ] 5.1 Create comprehensive database operation tests
+    - [ ] 5.1.1 Create tests/test_database_models.py
+    - [ ] 5.1.2 Create tests/test_video_service.py
+    - [ ] 5.1.3 Create tests/test_database_connection.py
+    - [ ] 5.1.4 Create database test fixtures and setup
+    - [ ] 5.1.5 Test migration up/down functionality
+  - [ ] 5.2 Create history API endpoint tests
+    - [ ] 5.2.1 Create tests/test_history_api.py
+    - [ ] 5.2.2 Test pagination functionality
+    - [ ] 5.2.3 Test filtering capabilities
+    - [ ] 5.2.4 Test error handling scenarios
+    - [ ] 5.2.5 Test response format validation
+  - [ ] 5.3 Create integration tests for workflow database persistence
+    - [ ] 5.3.1 Create tests/test_workflow_integration.py
+    - [ ] 5.3.2 Test end-to-end workflow with database storage
+    - [ ] 5.3.3 Test workflow with database failures
+    - [ ] 5.3.4 Test duplicate detection functionality
+  - [ ] 5.4 Update API documentation
+    - [ ] 5.4.1 Add history endpoints to FastAPI OpenAPI schema
+    - [ ] 5.4.2 Add comprehensive examples for history API usage
+    - [ ] 5.4.3 Document pagination and filtering parameters
+    - [ ] 5.4.4 Update main API documentation
+  - [ ] 5.5 Create database setup and migration documentation
+    - [ ] 5.5.1 Create docs/database-setup.md
+    - [ ] 5.5.2 Document database schema and relationships
+    - [ ] 5.5.3 Create migration guide documentation
+    - [ ] 5.5.4 Document backup and recovery procedures
