@@ -184,6 +184,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Include API routers
+try:
+    from .api.history import router as history_router
+    app.include_router(history_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.history import router as history_router
+        app.include_router(history_router)
+    except ImportError:
+        logger.warning("Could not import history router - history endpoints will not be available")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -550,6 +562,9 @@ async def root():
         "description": "AI-powered YouTube video summarization service",
         "endpoints": {
             "summarize": "/api/v1/summarize",
+            "history": "/api/v1/history/videos",
+            "video_detail": "/api/v1/history/videos/{id}",
+            "video_statistics": "/api/v1/history/statistics",
             "health": "/health",
             "database_health": "/health/database",
             "metrics": "/metrics",

@@ -121,37 +121,37 @@
     - [x] 3.5.2 Implement cleanup_old_records function
     - [x] 3.5.3 Implement database health check function
     - [x] 3.5.4 Create maintenance CLI commands
-- [ ] 4.0 History APIs Development
-  - [ ] 4.1 Create history service for querying processed videos
-    - [ ] 4.1.1 Create src/services/history_service.py with HistoryService class
-    - [ ] 4.1.2 Implement get_videos_paginated method
-    - [ ] 4.1.3 Implement get_video_by_id method
-    - [ ] 4.1.4 Implement search_videos method
-    - [ ] 4.1.5 Implement filter_videos_by_date method
-    - [ ] 4.1.6 Create pagination helper functions
-  - [ ] 4.2 Implement GET /api/v1/history/videos endpoint
-    - [ ] 4.2.1 Create src/api/history.py with FastAPI router
-    - [ ] 4.2.2 Create Pydantic models for history responses
-    - [ ] 4.2.3 Implement paginated video list endpoint
-    - [ ] 4.2.4 Add query parameters for page, page_size, sort_by
-    - [ ] 4.2.5 Add response models with pagination metadata
-  - [ ] 4.3 Add filtering capabilities
-    - [ ] 4.3.1 Add date_from and date_to query parameters
-    - [ ] 4.3.2 Add keywords filter query parameter
-    - [ ] 4.3.3 Add title_search query parameter
-    - [ ] 4.3.4 Implement combined filtering logic
-    - [ ] 4.3.5 Add validation for filter parameters
-  - [ ] 4.4 Implement GET /api/v1/history/videos/{video_id} endpoint
-    - [ ] 4.4.1 Create detailed video response model
-    - [ ] 4.4.2 Implement video detail endpoint
-    - [ ] 4.4.3 Include all related data (transcript, summary, keywords, segments)
-    - [ ] 4.4.4 Add proper 404 handling for non-existent videos
-  - [ ] 4.5 Add comprehensive error handling and validation
-    - [ ] 4.5.1 Create history-specific error responses
-    - [ ] 4.5.2 Add input validation for all query parameters
-    - [ ] 4.5.3 Implement proper HTTP status codes
-    - [ ] 4.5.4 Add request logging for history endpoints
-    - [ ] 4.5.5 Register history router with main FastAPI app
+- [x] 4.0 History APIs Development
+  - [x] 4.1 Create history service for querying processed videos
+    - [x] 4.1.1 Create src/services/history_service.py with HistoryService class
+    - [x] 4.1.2 Implement get_videos_paginated method
+    - [x] 4.1.3 Implement get_video_by_id method
+    - [x] 4.1.4 Implement search_videos method
+    - [x] 4.1.5 Implement filter_videos_by_date method
+    - [x] 4.1.6 Create pagination helper functions
+  - [x] 4.2 Implement GET /api/v1/history/videos endpoint
+    - [x] 4.2.1 Create src/api/history.py with FastAPI router
+    - [x] 4.2.2 Create Pydantic models for history responses
+    - [x] 4.2.3 Implement paginated video list endpoint
+    - [x] 4.2.4 Add query parameters for page, page_size, sort_by
+    - [x] 4.2.5 Add response models with pagination metadata
+  - [x] 4.3 Add filtering capabilities
+    - [x] 4.3.1 Add date_from and date_to query parameters
+    - [x] 4.3.2 Add keywords filter query parameter
+    - [x] 4.3.3 Add title_search query parameter
+    - [x] 4.3.4 Implement combined filtering logic
+    - [x] 4.3.5 Add validation for filter parameters
+  - [x] 4.4 Implement GET /api/v1/history/videos/{video_id} endpoint
+    - [x] 4.4.1 Create detailed video response model
+    - [x] 4.4.2 Implement video detail endpoint
+    - [x] 4.4.3 Include all related data (transcript, summary, keywords, segments)
+    - [x] 4.4.4 Add proper 404 handling for non-existent videos
+  - [x] 4.5 Add comprehensive error handling and validation
+    - [x] 4.5.1 Create history-specific error responses
+    - [x] 4.5.2 Add input validation for all query parameters
+    - [x] 4.5.3 Implement proper HTTP status codes
+    - [x] 4.5.4 Add request logging for history endpoints
+    - [x] 4.5.5 Register history router with main FastAPI app
 - [ ] 5.0 Testing & Documentation
   - [ ] 5.1 Create comprehensive database operation tests
     - [ ] 5.1.1 Create tests/test_database_models.py
