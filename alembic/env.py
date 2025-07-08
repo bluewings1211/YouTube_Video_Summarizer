@@ -12,7 +12,7 @@ from alembic import context
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 # Import the models to make them available for autogeneration
-from database.models import Base
+from src.database.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
