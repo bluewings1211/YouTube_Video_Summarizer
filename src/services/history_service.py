@@ -10,7 +10,7 @@ from datetime import datetime, date
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload, joinedload
-from sqlalchemy import select, func, and_, or_, text
+from sqlalchemy import select, func, and_, or_, text, delete
 from sqlalchemy.exc import SQLAlchemyError
 from dataclasses import dataclass
 from fastapi import Depends
@@ -558,6 +558,240 @@ class HistoryService:
             raise HistoryServiceError(f"Failed to get statistics: {db_error.message}")
         except Exception as e:
             self._logger.error(f"Unexpected error getting video statistics: {e}")
+            raise HistoryServiceError(f"Unexpected error: {e}")
+
+    def delete_video_by_id(self, video_id: int) -> bool:
+        """
+        Delete a specific video record and all its associated data.
+        
+        This method performs a cascading delete that removes:
+        - Video record from the videos table
+        - All associated transcripts
+        - All associated summaries
+        - All associated keywords
+        - All associated timestamped segments
+        - All associated processing metadata
+        
+        Args:
+            video_id: Database video ID to delete
+            
+        Returns:
+            True if video was deleted successfully, False if video was not found
+            
+        Raises:
+            HistoryServiceError: If deletion fails
+        """
+        try:
+            session = self._get_session()
+            
+            # First, verify the video exists
+            video = session.get(Video, video_id)
+            if not video:
+                self._logger.warning(f"Video with ID {video_id} not found for deletion")
+                return False
+            
+            # Store video info for logging
+            video_info = {
+                'id': video.id,
+                'video_id': video.video_id,
+                'title': video.title,
+                'url': video.url
+            }
+            
+            # Delete the video (cascading delete will handle related records)
+            session.delete(video)
+            session.commit()
+            
+            self._logger.info(f"Successfully deleted video: {video_info}")
+            return True
+            
+        except SQLAlchemyError as e:
+            db_error = classify_database_error(e)
+            self._logger.error(f"Database error deleting video {video_id}: {db_error}")
+            raise HistoryServiceError(f"Failed to delete video: {db_error.message}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error deleting video {video_id}: {e}")
+            raise HistoryServiceError(f"Unexpected error: {e}")
+
+    def delete_video_by_video_id(self, video_id: str) -> bool:
+        """
+        Delete a specific video record by YouTube video ID.
+        
+        Args:
+            video_id: YouTube video ID (11 characters)
+            
+        Returns:
+            True if video was deleted successfully, False if video was not found
+            
+        Raises:
+            HistoryServiceError: If deletion fails
+        """
+        try:
+            session = self._get_session()
+            
+            # Find the video by YouTube video ID
+            query = select(Video).where(Video.video_id == video_id)
+            result = session.execute(query)
+            video = result.scalar_one_or_none()
+            
+            if not video:
+                self._logger.warning(f"Video with video_id '{video_id}' not found for deletion")
+                return False
+            
+            # Use the database ID deletion method
+            return self.delete_video_by_id(video.id)
+            
+        except SQLAlchemyError as e:
+            db_error = classify_database_error(e)
+            self._logger.error(f"Database error deleting video by video_id '{video_id}': {db_error}")
+            raise HistoryServiceError(f"Failed to delete video: {db_error.message}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error deleting video by video_id '{video_id}': {e}")
+            raise HistoryServiceError(f"Unexpected error: {e}")
+
+    def delete_multiple_videos(self, video_ids: List[int]) -> Dict[str, Any]:
+        """
+        Delete multiple videos by their database IDs.
+        
+        Args:
+            video_ids: List of database video IDs to delete
+            
+        Returns:
+            Dictionary containing deletion results:
+            {
+                "deleted_count": int,
+                "failed_count": int,
+                "not_found_count": int,
+                "deleted_videos": List[Dict],
+                "failed_videos": List[Dict]
+            }
+            
+        Raises:
+            HistoryServiceError: If batch deletion fails
+        """
+        try:
+            session = self._get_session()
+            
+            results = {
+                "deleted_count": 0,
+                "failed_count": 0,
+                "not_found_count": 0,
+                "deleted_videos": [],
+                "failed_videos": []
+            }
+            
+            for video_id in video_ids:
+                try:
+                    # Verify the video exists
+                    video = session.get(Video, video_id)
+                    if not video:
+                        results["not_found_count"] += 1
+                        results["failed_videos"].append({
+                            "video_id": video_id,
+                            "error": "Video not found"
+                        })
+                        continue
+                    
+                    # Store video info for results
+                    video_info = {
+                        "id": video.id,
+                        "video_id": video.video_id,
+                        "title": video.title,
+                        "url": video.url
+                    }
+                    
+                    # Delete the video
+                    session.delete(video)
+                    session.commit()
+                    
+                    results["deleted_count"] += 1
+                    results["deleted_videos"].append(video_info)
+                    
+                except Exception as e:
+                    results["failed_count"] += 1
+                    results["failed_videos"].append({
+                        "video_id": video_id,
+                        "error": str(e)
+                    })
+                    self._logger.error(f"Failed to delete video {video_id}: {e}")
+                    # Continue with next video
+                    continue
+            
+            self._logger.info(f"Batch deletion completed: {results['deleted_count']} deleted, "
+                            f"{results['failed_count']} failed, {results['not_found_count']} not found")
+            
+            return results
+            
+        except SQLAlchemyError as e:
+            db_error = classify_database_error(e)
+            self._logger.error(f"Database error in batch deletion: {db_error}")
+            raise HistoryServiceError(f"Failed to delete videos: {db_error.message}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error in batch deletion: {e}")
+            raise HistoryServiceError(f"Unexpected error: {e}")
+
+    def get_video_deletion_info(self, video_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get information about what will be deleted when deleting a video.
+        
+        Args:
+            video_id: Database video ID
+            
+        Returns:
+            Dictionary containing deletion impact information or None if video not found
+            
+        Raises:
+            HistoryServiceError: If query fails
+        """
+        try:
+            session = self._get_session()
+            
+            # Get video with related data counts
+            query = select(Video).options(
+                selectinload(Video.transcripts),
+                selectinload(Video.summaries),
+                selectinload(Video.keywords),
+                selectinload(Video.timestamped_segments),
+                selectinload(Video.processing_metadata)
+            ).where(Video.id == video_id)
+            
+            result = session.execute(query)
+            video = result.scalar_one_or_none()
+            
+            if not video:
+                return None
+            
+            deletion_info = {
+                "video": {
+                    "id": video.id,
+                    "video_id": video.video_id,
+                    "title": video.title,
+                    "url": video.url,
+                    "created_at": video.created_at,
+                    "updated_at": video.updated_at
+                },
+                "related_data_counts": {
+                    "transcripts": len(video.transcripts),
+                    "summaries": len(video.summaries),
+                    "keywords": len(video.keywords),
+                    "timestamped_segments": len(video.timestamped_segments),
+                    "processing_metadata": len(video.processing_metadata)
+                },
+                "total_related_records": (
+                    len(video.transcripts) + len(video.summaries) + 
+                    len(video.keywords) + len(video.timestamped_segments) + 
+                    len(video.processing_metadata)
+                )
+            }
+            
+            return deletion_info
+            
+        except SQLAlchemyError as e:
+            db_error = classify_database_error(e)
+            self._logger.error(f"Database error getting deletion info for video {video_id}: {db_error}")
+            raise HistoryServiceError(f"Failed to get deletion info: {db_error.message}")
+        except Exception as e:
+            self._logger.error(f"Unexpected error getting deletion info for video {video_id}: {e}")
             raise HistoryServiceError(f"Unexpected error: {e}")
 
 
