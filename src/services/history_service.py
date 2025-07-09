@@ -24,6 +24,10 @@ from ..database.exceptions import (
     classify_database_error
 )
 from ..database.connection import get_database_session_dependency
+from ..database.cascade_delete import (
+    CascadeDeleteManager, CascadeDeleteResult, CascadeDeleteValidation,
+    create_cascade_delete_manager, validate_video_deletion, execute_enhanced_cascade_delete
+)
 
 logger = logging.getLogger(__name__)
 
@@ -793,6 +797,178 @@ class HistoryService:
         except Exception as e:
             self._logger.error(f"Unexpected error getting deletion info for video {video_id}: {e}")
             raise HistoryServiceError(f"Unexpected error: {e}")
+
+    def validate_video_deletion(self, video_id: int) -> CascadeDeleteValidation:
+        """
+        Validate that a video can be safely deleted using enhanced cascade delete logic.
+        
+        Args:
+            video_id: Database video ID
+            
+        Returns:
+            CascadeDeleteValidation with detailed validation results
+            
+        Raises:
+            HistoryServiceError: If validation fails
+        """
+        try:
+            session = self._get_session()
+            validation = validate_video_deletion(session, video_id)
+            
+            self._logger.info(f"Validation for video {video_id}: can_delete={validation.can_delete}, "
+                            f"related_records={validation.total_related_records}")
+            
+            return validation
+            
+        except Exception as e:
+            self._logger.error(f"Error validating video deletion for {video_id}: {e}")
+            raise HistoryServiceError(f"Failed to validate deletion: {e}")
+
+    def enhanced_delete_video_by_id(self, video_id: int, force: bool = False) -> CascadeDeleteResult:
+        """
+        Delete a video using enhanced cascade delete with validation and monitoring.
+        
+        Args:
+            video_id: Database video ID to delete
+            force: Skip validation if True
+            
+        Returns:
+            CascadeDeleteResult with detailed operation results
+            
+        Raises:
+            HistoryServiceError: If deletion fails
+        """
+        try:
+            session = self._get_session()
+            result = execute_enhanced_cascade_delete(session, video_id, force=force)
+            
+            if result.success:
+                self._logger.info(f"Enhanced cascade delete successful for video {video_id}: "
+                                f"deleted {result.total_deleted} records in {result.execution_time_ms:.2f}ms")
+            else:
+                self._logger.error(f"Enhanced cascade delete failed for video {video_id}: {result.error_message}")
+            
+            return result
+            
+        except Exception as e:
+            self._logger.error(f"Error in enhanced cascade delete for video {video_id}: {e}")
+            raise HistoryServiceError(f"Failed to delete video: {e}")
+
+    def enhanced_batch_delete_videos(self, video_ids: List[int], force: bool = False) -> List[CascadeDeleteResult]:
+        """
+        Delete multiple videos using enhanced cascade delete with validation and monitoring.
+        
+        Args:
+            video_ids: List of database video IDs to delete
+            force: Skip validation if True
+            
+        Returns:
+            List of CascadeDeleteResult for each video
+            
+        Raises:
+            HistoryServiceError: If batch deletion fails
+        """
+        try:
+            session = self._get_session()
+            manager = create_cascade_delete_manager(session)
+            results = manager.batch_cascade_delete(video_ids, force=force)
+            
+            # Log batch summary
+            successful = sum(1 for r in results if r.success)
+            failed = len(results) - successful
+            total_deleted = sum(r.total_deleted for r in results)
+            
+            self._logger.info(f"Enhanced batch delete completed: {successful} successful, "
+                            f"{failed} failed, {total_deleted} total records deleted")
+            
+            return results
+            
+        except Exception as e:
+            self._logger.error(f"Error in enhanced batch delete: {e}")
+            raise HistoryServiceError(f"Failed to delete videos: {e}")
+
+    def verify_cascade_delete_integrity(self, video_id: int) -> Dict[str, Any]:
+        """
+        Verify that a cascade delete operation completed successfully.
+        
+        Args:
+            video_id: Video ID that was deleted
+            
+        Returns:
+            Dictionary with integrity verification results
+            
+        Raises:
+            HistoryServiceError: If verification fails
+        """
+        try:
+            session = self._get_session()
+            manager = create_cascade_delete_manager(session)
+            
+            integrity_result = manager.verify_cascade_integrity(video_id)
+            
+            if integrity_result.get('integrity_check_passed'):
+                self._logger.info(f"Cascade delete integrity verified for video {video_id}")
+            else:
+                self._logger.warning(f"Cascade delete integrity issues for video {video_id}: {integrity_result}")
+            
+            return integrity_result
+            
+        except Exception as e:
+            self._logger.error(f"Error verifying cascade delete integrity for video {video_id}: {e}")
+            raise HistoryServiceError(f"Failed to verify integrity: {e}")
+
+    def cleanup_orphaned_records(self, video_id: int) -> Dict[str, int]:
+        """
+        Clean up any orphaned records left after deletion.
+        
+        Args:
+            video_id: Video ID to clean up orphans for
+            
+        Returns:
+            Dictionary with counts of cleaned up records
+            
+        Raises:
+            HistoryServiceError: If cleanup fails
+        """
+        try:
+            session = self._get_session()
+            manager = create_cascade_delete_manager(session)
+            
+            cleaned_counts = manager.cleanup_orphaned_records(video_id)
+            
+            if cleaned_counts:
+                self._logger.info(f"Cleaned up orphaned records for video {video_id}: {cleaned_counts}")
+            else:
+                self._logger.info(f"No orphaned records found for video {video_id}")
+            
+            return cleaned_counts
+            
+        except Exception as e:
+            self._logger.error(f"Error cleaning up orphaned records for video {video_id}: {e}")
+            raise HistoryServiceError(f"Failed to cleanup orphaned records: {e}")
+
+    def get_cascade_delete_statistics(self) -> Dict[str, Any]:
+        """
+        Get comprehensive statistics about cascade delete operations.
+        
+        Returns:
+            Dictionary with cascade delete statistics
+            
+        Raises:
+            HistoryServiceError: If statistics retrieval fails
+        """
+        try:
+            session = self._get_session()
+            manager = create_cascade_delete_manager(session)
+            
+            stats = manager.get_cascade_delete_statistics()
+            
+            self._logger.info("Retrieved cascade delete statistics")
+            return stats
+            
+        except Exception as e:
+            self._logger.error(f"Error getting cascade delete statistics: {e}")
+            raise HistoryServiceError(f"Failed to get statistics: {e}")
 
 
 # Dependency injection function for FastAPI
