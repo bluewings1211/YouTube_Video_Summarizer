@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..database.connection import get_database_session_dependency
 from ..services.history_service import HistoryService, get_history_service, HistoryServiceError
 from ..database.models import Video, Transcript, Summary, Keyword, TimestampedSegment, ProcessingMetadata
+from ..database.cascade_delete import CascadeDeleteResult, CascadeDeleteValidation
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,76 @@ class ErrorResponse(BaseModel):
     error: str
     message: str
     details: Optional[Dict[str, Any]] = None
+
+
+class VideoDeletionInfoResponse(BaseModel):
+    """Response model for video deletion information."""
+    video: Dict[str, Any]
+    related_data_counts: Dict[str, int]
+    total_related_records: int
+
+    class Config:
+        from_attributes = True
+
+
+class CascadeDeleteValidationResponse(BaseModel):
+    """Response model for cascade delete validation."""
+    can_delete: bool
+    video_exists: bool
+    related_counts: Dict[str, int]
+    potential_issues: List[str]
+    total_related_records: int
+
+    class Config:
+        from_attributes = True
+
+
+class CascadeDeleteResultResponse(BaseModel):
+    """Response model for cascade delete result."""
+    success: bool
+    video_id: int
+    deleted_counts: Dict[str, int]
+    total_deleted: int
+    error_message: Optional[str] = None
+    execution_time_ms: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BatchDeleteResponse(BaseModel):
+    """Response model for batch delete operations."""
+    results: List[CascadeDeleteResultResponse]
+    summary: Dict[str, Any]
+
+
+class DeleteVideoRequest(BaseModel):
+    """Request model for video deletion."""
+    force: bool = Field(False, description="Skip validation and force deletion")
+    audit_user: Optional[str] = Field(None, description="User performing the deletion")
+
+
+class BatchDeleteVideoRequest(BaseModel):
+    """Request model for batch video deletion."""
+    video_ids: List[int] = Field(..., description="List of video IDs to delete")
+    force: bool = Field(False, description="Skip validation and force deletion")
+    audit_user: Optional[str] = Field(None, description="User performing the deletion")
+
+
+class IntegrityCheckResponse(BaseModel):
+    """Response model for deletion integrity check."""
+    video_exists: bool
+    has_orphaned_records: bool
+    orphaned_records: Dict[str, int]
+    integrity_check_passed: bool
+    error: Optional[str] = None
+
+
+class CascadeDeleteStatisticsResponse(BaseModel):
+    """Response model for cascade delete statistics."""
+    total_videos: int
+    average_related_records: Dict[str, Dict[str, Any]]
+    videos_with_most_related: List[Dict[str, Any]]
 
 
 # Query parameter models
@@ -426,6 +497,318 @@ async def health_check():
     Health check endpoint for the history API.
     """
     return {"status": "healthy", "service": "history_api"}
+
+
+# Video deletion endpoints
+@router.get("/videos/{video_id}/deletion-info", response_model=VideoDeletionInfoResponse)
+async def get_video_deletion_info(
+    video_id: int,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Get information about what will be deleted when deleting a video.
+    
+    Returns detailed information about the video and all related records
+    that will be affected by the deletion operation.
+    """
+    try:
+        deletion_info = history_service.get_video_deletion_info(video_id)
+        
+        if not deletion_info:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Video with ID {video_id} not found"
+            )
+        
+        return VideoDeletionInfoResponse(**deletion_info)
+        
+    except HistoryServiceError as e:
+        logger.error(f"History service error getting deletion info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error getting deletion info: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/videos/{video_id}/validate-deletion", response_model=CascadeDeleteValidationResponse)
+async def validate_video_deletion(
+    video_id: int,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Validate that a video can be safely deleted.
+    
+    Checks for potential issues like active processing tasks,
+    large numbers of related records, or other constraints.
+    """
+    try:
+        validation = history_service.validate_video_deletion(video_id)
+        
+        return CascadeDeleteValidationResponse(
+            can_delete=validation.can_delete,
+            video_exists=validation.video_exists,
+            related_counts=validation.related_counts,
+            potential_issues=validation.potential_issues,
+            total_related_records=validation.total_related_records
+        )
+        
+    except HistoryServiceError as e:
+        logger.error(f"History service error validating deletion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error validating deletion: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/videos/{video_id}", response_model=CascadeDeleteResultResponse)
+async def delete_video(
+    video_id: int,
+    delete_request: DeleteVideoRequest,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Delete a video and all its related data.
+    
+    Performs a cascade delete operation that removes the video
+    and all associated transcripts, summaries, keywords, segments,
+    and processing metadata.
+    """
+    try:
+        # Use enhanced cascade delete
+        result = history_service.enhanced_delete_video_by_id(
+            video_id=video_id,
+            force=delete_request.force
+        )
+        
+        if not result.success:
+            # If deletion failed, return 400 with error details
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to delete video: {result.error_message}"
+            )
+        
+        # Log the deletion with audit information
+        logger.info(f"Video {video_id} deleted successfully by {delete_request.audit_user or 'unknown'}")
+        
+        return CascadeDeleteResultResponse(
+            success=result.success,
+            video_id=result.video_id,
+            deleted_counts=result.deleted_counts,
+            total_deleted=result.total_deleted,
+            error_message=result.error_message,
+            execution_time_ms=result.execution_time_ms
+        )
+        
+    except HTTPException:
+        raise
+    except HistoryServiceError as e:
+        logger.error(f"History service error deleting video: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error deleting video: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/videos/{video_id}/by-youtube-id", response_model=CascadeDeleteResultResponse)
+async def delete_video_by_youtube_id(
+    video_id: str,
+    delete_request: DeleteVideoRequest,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Delete a video by its YouTube video ID.
+    
+    Finds the video by YouTube ID and performs cascade deletion.
+    """
+    try:
+        # First find the video by YouTube ID
+        if not history_service.delete_video_by_video_id(video_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Video with YouTube ID '{video_id}' not found"
+            )
+        
+        logger.info(f"Video with YouTube ID '{video_id}' deleted successfully by {delete_request.audit_user or 'unknown'}")
+        
+        # Since delete_video_by_video_id returns only boolean, we create a simplified response
+        return CascadeDeleteResultResponse(
+            success=True,
+            video_id=0,  # We don't have the database ID in this context
+            deleted_counts={},
+            total_deleted=1,
+            error_message=None,
+            execution_time_ms=None
+        )
+        
+    except HTTPException:
+        raise
+    except HistoryServiceError as e:
+        logger.error(f"History service error deleting video by YouTube ID: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error deleting video by YouTube ID: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/videos/batch-delete", response_model=BatchDeleteResponse)
+async def batch_delete_videos(
+    delete_request: BatchDeleteVideoRequest,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Delete multiple videos in a batch operation.
+    
+    Performs cascade deletion for multiple videos with detailed
+    results for each video.
+    """
+    try:
+        if not delete_request.video_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="No video IDs provided for batch deletion"
+            )
+        
+        if len(delete_request.video_ids) > 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Batch deletion limited to 100 videos at a time"
+            )
+        
+        # Perform batch deletion
+        results = history_service.enhanced_batch_delete_videos(
+            video_ids=delete_request.video_ids,
+            force=delete_request.force
+        )
+        
+        # Convert results to response format
+        response_results = [
+            CascadeDeleteResultResponse(
+                success=result.success,
+                video_id=result.video_id,
+                deleted_counts=result.deleted_counts,
+                total_deleted=result.total_deleted,
+                error_message=result.error_message,
+                execution_time_ms=result.execution_time_ms
+            )
+            for result in results
+        ]
+        
+        # Calculate summary
+        successful_count = sum(1 for r in results if r.success)
+        failed_count = len(results) - successful_count
+        total_deleted = sum(r.total_deleted for r in results)
+        total_time = sum(r.execution_time_ms or 0 for r in results)
+        
+        summary = {
+            "total_videos": len(delete_request.video_ids),
+            "successful_deletions": successful_count,
+            "failed_deletions": failed_count,
+            "total_records_deleted": total_deleted,
+            "total_execution_time_ms": total_time,
+            "success_rate": (successful_count / len(results)) * 100 if results else 0
+        }
+        
+        logger.info(f"Batch deletion completed: {successful_count} successful, {failed_count} failed by {delete_request.audit_user or 'unknown'}")
+        
+        return BatchDeleteResponse(
+            results=response_results,
+            summary=summary
+        )
+        
+    except HTTPException:
+        raise
+    except HistoryServiceError as e:
+        logger.error(f"History service error in batch deletion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in batch deletion: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/videos/{video_id}/integrity-check", response_model=IntegrityCheckResponse)
+async def check_deletion_integrity(
+    video_id: int,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Check the integrity of a video deletion operation.
+    
+    Verifies that a video and all related records have been
+    properly deleted with no orphaned records remaining.
+    """
+    try:
+        integrity_result = history_service.verify_cascade_delete_integrity(video_id)
+        
+        return IntegrityCheckResponse(
+            video_exists=integrity_result.get('video_exists', False),
+            has_orphaned_records=integrity_result.get('has_orphaned_records', False),
+            orphaned_records=integrity_result.get('orphaned_records', {}),
+            integrity_check_passed=integrity_result.get('integrity_check_passed', False),
+            error=integrity_result.get('error')
+        )
+        
+    except HistoryServiceError as e:
+        logger.error(f"History service error checking integrity: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error checking integrity: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/videos/{video_id}/cleanup-orphans")
+async def cleanup_orphaned_records(
+    video_id: int,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Clean up any orphaned records for a deleted video.
+    
+    Removes any related records that may have been left behind
+    during a deletion operation.
+    """
+    try:
+        cleaned_counts = history_service.cleanup_orphaned_records(video_id)
+        
+        return {
+            "video_id": video_id,
+            "cleaned_records": cleaned_counts,
+            "total_cleaned": sum(cleaned_counts.values()),
+            "message": "Orphaned records cleaned successfully" if cleaned_counts else "No orphaned records found"
+        }
+        
+    except HistoryServiceError as e:
+        logger.error(f"History service error cleaning orphans: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error cleaning orphans: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/deletion-statistics", response_model=CascadeDeleteStatisticsResponse)
+async def get_cascade_delete_statistics(
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Get statistics about cascade delete operations.
+    
+    Returns information about video deletion patterns,
+    average related record counts, and videos with most related data.
+    """
+    try:
+        stats = history_service.get_cascade_delete_statistics()
+        
+        return CascadeDeleteStatisticsResponse(
+            total_videos=stats.get('total_videos', 0),
+            average_related_records=stats.get('average_related_records', {}),
+            videos_with_most_related=stats.get('videos_with_most_related', [])
+        )
+        
+    except HistoryServiceError as e:
+        logger.error(f"History service error getting statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error getting statistics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # Error handlers would be added to the main app, not the router
