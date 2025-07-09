@@ -284,11 +284,31 @@ def get_all_models():
     return [Video, Transcript, Summary, Keyword, TimestampedSegment, ProcessingMetadata]
 
 
+def get_all_models_with_batch():
+    """Get all model classes including batch models."""
+    from .batch_models import get_all_batch_models
+    return get_all_models() + get_all_batch_models()
+
+
 def create_tables(engine):
     """Create all tables in the database."""
     Base.metadata.create_all(bind=engine)
 
 
+def create_all_tables(engine):
+    """Create all tables including batch processing tables."""
+    from .batch_models import create_batch_tables
+    Base.metadata.create_all(bind=engine)
+    create_batch_tables(engine)
+
+
 def drop_tables(engine):
     """Drop all tables from the database."""
+    Base.metadata.drop_all(bind=engine)
+
+
+def drop_all_tables(engine):
+    """Drop all tables including batch processing tables."""
+    from .batch_models import drop_batch_tables
+    drop_batch_tables(engine)
     Base.metadata.drop_all(bind=engine)
