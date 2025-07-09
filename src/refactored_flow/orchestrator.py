@@ -52,6 +52,8 @@ try:
         KeywordExtractionNode,
         NodeError
     )
+    from ..services.video_service import VideoService
+    from ..database.connection import get_database_session
     from ..utils.language_detector import (
         YouTubeLanguageDetector, LanguageDetectionResult, LanguageCode,
         detect_video_language, is_chinese_video, is_english_video,
@@ -196,7 +198,23 @@ class YouTubeSummarizerFlow(Flow):
             
             # Check for duplicate videos and handle accordingly
             duplicate_result = self._handle_duplicate_detection(input_data)
-            logger.info(f"Duplicate detection result: {duplicate_result}")
+            
+            # Log duplicate detection result summary (avoid logging full data)
+            if duplicate_result:
+                data = duplicate_result.get('data', {})
+                summary = {
+                    'status': duplicate_result.get('status'),
+                    'video_id': data.get('video_id'),
+                    'video_title': data.get('video_title', '')[:50] + '...' if len(data.get('video_title', '')) > 50 else data.get('video_title', ''),
+                    'has_summary': bool(data.get('summary_text')),
+                    'has_keywords': bool(data.get('keywords')),
+                    'has_timestamps': bool(data.get('timestamps')),
+                    'workflow_skipped': duplicate_result.get('workflow_skipped', False)
+                }
+                logger.info(f"Duplicate detection result: {summary}")
+            else:
+                logger.info("Duplicate detection result: None")
+            
             if duplicate_result:
                 logger.info("Returning duplicate result, skipping workflow execution")
                 return duplicate_result
@@ -332,26 +350,8 @@ class YouTubeSummarizerFlow(Flow):
             exec_result = node.exec(self.store, prep_result)
             
             # Post phase (handle async post methods)
-            import asyncio
-            import inspect
-            
-            if inspect.iscoroutinefunction(node.post):
-                # Handle async post method
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # If we're already in an async context, we need to handle this differently
-                        # For now, log a warning and use sync fallback
-                        logger.warning(f"Node {node_name} has async post method but workflow is sync. Database persistence may be skipped.")
-                        post_result = {'post_status': 'skipped', 'reason': 'async_in_sync_context', 'database_saved': False}
-                    else:
-                        post_result = loop.run_until_complete(node.post(self.store, prep_result, exec_result))
-                except RuntimeError:
-                    # No event loop, create one
-                    post_result = asyncio.run(node.post(self.store, prep_result, exec_result))
-            else:
-                # Handle sync post method
-                post_result = node.post(self.store, prep_result, exec_result)
+            # Handle post-processing (all post methods are now synchronous)
+            post_result = node.post(self.store, prep_result, exec_result)
             
             return {
                 'prep_result': prep_result,
@@ -446,21 +446,15 @@ class YouTubeSummarizerFlow(Flow):
                 # Cannot extract video ID, proceed with processing
                 return None
             
-            # Check if video exists in database
-            import asyncio
-            
+            # Check if video exists in database (now synchronous)
             try:
-                # Handle async/sync context
-                if hasattr(asyncio, '_get_running_loop') and asyncio._get_running_loop():
-                    # Already in async context - this shouldn't happen in current design
-                    logger.warning("Duplicate detection called in async context")
-                    return None
-                else:
-                    # Create async context for database check
-                    video_exists = asyncio.run(self.video_service.video_exists(video_id))
-            except RuntimeError:
-                # No event loop, create one
-                video_exists = asyncio.run(self.video_service.video_exists(video_id))
+                with get_database_session() as session:
+                    video_service = VideoService(session)
+                    video_exists = video_service.video_exists(video_id)
+            except Exception as e:
+                logger.warning(f"Error checking if video exists: {e}")
+                # If we can't check, proceed with processing to be safe
+                return None
             
             if not video_exists:
                 # Video not found, proceed with processing
@@ -482,7 +476,9 @@ class YouTubeSummarizerFlow(Flow):
             
             elif reprocess_policy == 'if_failed':
                 # Check if previous processing failed
-                processing_status = asyncio.run(self.video_service.get_processing_status(video_id))
+                with get_database_session() as session:
+                    video_service = VideoService(session)
+                    processing_status = video_service.get_processing_status(video_id)
                 if processing_status == 'failed':
                     logger.info(f"Video {video_id} exists but failed, reprocessing (policy: if_failed)")
                     return None
@@ -546,56 +542,56 @@ class YouTubeSummarizerFlow(Flow):
             Dict containing existing video processing results
         """
         try:
-            import asyncio
-            
             # Get video with all related data
-            video = asyncio.run(self.video_service.get_video_by_video_id(video_id))
-            
-            if not video:
-                logger.warning(f"Video {video_id} exists check passed but retrieval failed")
-                return None
-            
-            # Convert database models to workflow result format
-            result_data = {
-                'video_id': video.video_id,
-                'video_title': video.title,
-                'video_duration': video.duration,
-                'video_url': video.url,
-                'transcript_text': '',
-                'summary_text': '',
-                'keywords': [],
-                'timestamps': []
-            }
-            
-            # Extract transcript data
-            if video.transcripts:
-                latest_transcript = video.transcripts[-1]  # Get most recent
-                result_data['transcript_text'] = latest_transcript.content
-                result_data['transcript_language'] = latest_transcript.language
-            
-            # Extract summary data
-            if video.summaries:
-                latest_summary = video.summaries[-1]  # Get most recent
-                result_data['summary_text'] = latest_summary.content
-                result_data['summary_processing_time'] = latest_summary.processing_time
-            
-            # Extract keywords data
-            if video.keywords:
-                latest_keywords = video.keywords[-1]  # Get most recent
-                keywords_data = latest_keywords.keywords_json
-                if isinstance(keywords_data, dict):
-                    result_data['keywords'] = keywords_data.get('keywords', [])
-                elif isinstance(keywords_data, list):
-                    result_data['keywords'] = keywords_data
-            
-            # Extract timestamped segments
-            if video.timestamped_segments:
-                latest_segments = video.timestamped_segments[-1]  # Get most recent
-                segments_data = latest_segments.segments_json
-                if isinstance(segments_data, dict):
-                    result_data['timestamps'] = segments_data.get('timestamps', [])
-                elif isinstance(segments_data, list):
-                    result_data['timestamps'] = segments_data
+            with get_database_session() as session:
+                video_service = VideoService(session)
+                video = video_service.get_video_by_video_id(video_id)
+                
+                if not video:
+                    logger.warning(f"Video {video_id} exists check passed but retrieval failed")
+                    return None
+                
+                # Convert database models to workflow result format
+                result_data = {
+                    'video_id': video.video_id,
+                    'video_title': video.title,
+                    'video_duration': video.duration,
+                    'video_url': video.url,
+                    'transcript_text': '',
+                    'summary_text': '',
+                    'keywords': [],
+                    'timestamps': []
+                }
+                
+                # Extract transcript data
+                if video.transcripts:
+                    latest_transcript = video.transcripts[-1]  # Get most recent
+                    result_data['transcript_text'] = latest_transcript.content
+                    result_data['transcript_language'] = latest_transcript.language
+                
+                # Extract summary data
+                if video.summaries:
+                    latest_summary = video.summaries[-1]  # Get most recent
+                    result_data['summary_text'] = latest_summary.content
+                    result_data['summary_processing_time'] = latest_summary.processing_time
+                
+                # Extract keywords data
+                if video.keywords:
+                    latest_keywords = video.keywords[-1]  # Get most recent
+                    keywords_data = latest_keywords.keywords_json
+                    if isinstance(keywords_data, dict):
+                        result_data['keywords'] = keywords_data.get('keywords', [])
+                    elif isinstance(keywords_data, list):
+                        result_data['keywords'] = keywords_data
+                
+                # Extract timestamped segments
+                if video.timestamped_segments:
+                    latest_segments = video.timestamped_segments[-1]  # Get most recent
+                    segments_data = latest_segments.segments_json
+                    if isinstance(segments_data, dict):
+                        result_data['timestamps'] = segments_data.get('timestamps', [])
+                    elif isinstance(segments_data, list):
+                        result_data['timestamps'] = segments_data
             
             # Add metadata about cached result
             result_data['cached_result'] = True
@@ -660,27 +656,17 @@ class YouTubeSummarizerFlow(Flow):
                 status = 'failed'
                 error_info = str(result.get('error', 'Unknown error'))
             
-            # Save metadata asynchronously
-            import asyncio
+            # Save metadata directly (now synchronous)
+            with get_database_session() as session:
+                video_service = VideoService(session)
+                video_service.save_processing_metadata(
+                    video_id=video_id,
+                    workflow_params=workflow_params,
+                    status=status,
+                    error_info=error_info
+                )
             
-            try:
-                asyncio.run(self.video_service.save_processing_metadata(
-                    video_id=video_id,
-                    workflow_params=workflow_params,
-                    status=status,
-                    error_info=error_info
-                ))
-                logger.info(f"Saved workflow completion metadata for video {video_id}")
-                
-            except RuntimeError:
-                # No event loop, create one
-                asyncio.run(self.video_service.save_processing_metadata(
-                    video_id=video_id,
-                    workflow_params=workflow_params,
-                    status=status,
-                    error_info=error_info
-                ))
-                logger.info(f"Saved workflow completion metadata for video {video_id}")
+            logger.info(f"Saved workflow completion metadata for video {video_id}")
                 
         except Exception as e:
             logger.error(f"Error saving workflow completion metadata: {str(e)}")
@@ -699,21 +685,18 @@ class YouTubeSummarizerFlow(Flow):
             return
         
         try:
-            # Quick database health check
-            import asyncio
-            
-            async def check_db_health():
-                try:
-                    # Simple existence check - this should be fast
-                    await self.video_service.video_exists("test_health_check")
-                    return True
-                except Exception:
-                    return False
-            
+            # Quick database health check (now synchronous)
             try:
-                db_healthy = asyncio.run(check_db_health())
-            except RuntimeError:
-                db_healthy = asyncio.run(check_db_health())
+                # Simple existence check - this should be fast
+                with get_database_session() as session:
+                    video_service = VideoService(session)
+                    video_service.video_exists("test_health_check")
+                db_healthy = True
+                logger.info("Database health check passed")
+            except Exception as e:
+                logger.warning(f"Database health check failed: {e}")
+                # Fallback: assume database is unhealthy
+                db_healthy = False
             
             if db_healthy:
                 logger.info("Database health check passed, full persistence enabled")

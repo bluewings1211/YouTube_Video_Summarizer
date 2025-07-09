@@ -163,22 +163,40 @@ curl -X POST "http://localhost:8000/api/v1/summarize" \
 
 ## API Documentation
 
-### Video Processing API
+The YouTube Summarizer Web Service provides a comprehensive REST API built with FastAPI. The API includes **11 endpoints** across different categories for video processing, history management, health monitoring, and documentation.
 
-#### Endpoint: POST /api/v1/summarize
+### 📊 API Endpoints Overview
+
+| Category | Endpoint | Method | Description |
+|----------|----------|---------|-------------|
+| **Core** | `/api/v1/summarize` | POST | Main video summarization |
+| **System** | `/health` | GET | Service health check |
+| **System** | `/health/database` | GET | Database connectivity check |
+| **System** | `/metrics` | GET | Application metrics |
+| **History** | `/api/v1/history/videos` | GET | List processed videos |
+| **History** | `/api/v1/history/videos/{video_id}` | GET | Get video details |
+| **History** | `/api/v1/history/statistics` | GET | Video statistics |
+| **History** | `/api/v1/history/health` | GET | History API health |
+| **Docs** | `/api/docs` | GET | Interactive API documentation |
+| **Docs** | `/api/redoc` | GET | ReDoc documentation |
+| **Info** | `/` | GET | Root endpoint with API info |
+
+### 🎯 Core API Endpoints
+
+#### POST /api/v1/summarize
+**Main Video Summarization Endpoint**
 
 Processes a YouTube video URL and returns comprehensive analysis including summary, keywords, and timestamped segments.
 
-#### Request
-
+**Request:**
 ```json
 {
-  "youtube_url": "https://www.youtube.com/watch?v=VIDEO_ID"
+  "youtube_url": "https://www.youtube.com/watch?v=VIDEO_ID",
+  "reprocess_policy": "skip_existing"  // optional: "skip_existing" or "force_reprocess"
 }
 ```
 
-#### Response
-
+**Response:**
 ```json
 {
   "video_id": "VIDEO_ID",
@@ -198,36 +216,101 @@ Processes a YouTube video URL and returns comprehensive analysis including summa
 }
 ```
 
-#### Error Responses
-
+**Error Responses:**
 - **400 Bad Request**: Invalid YouTube URL or unsupported video type
 - **404 Not Found**: Video not found or unavailable
 - **422 Unprocessable Entity**: Video too long (>30 minutes) or no transcript available
 - **500 Internal Server Error**: Processing failure or API errors
 
-### Additional Endpoints
+#### GET /
+**Root Information Endpoint**
 
-- **GET /health**: Service health check
-- **GET /health/database**: Database connectivity check
-- **GET /**: API information and documentation
-- **GET /api/v1/history/videos**: List processed videos with pagination and filtering
-- **GET /api/v1/history/videos/{video_id}**: Get detailed information for a specific video
-- **GET /api/v1/history/statistics**: Get processing statistics
+Returns API information and available endpoints.
 
-### History API
+**Response:**
+```json
+{
+  "service": "YouTube Video Summarizer",
+  "version": "1.0.0",
+  "endpoints": {
+    "summarize": "/api/v1/summarize",
+    "health": "/health",
+    "docs": "/api/docs"
+  },
+  "features": ["AI Summarization", "Keyword Extraction", "Timestamped Segments"]
+}
+```
 
-#### Endpoint: GET /api/v1/history/videos
+### 🏥 Health & Monitoring Endpoints
+
+#### GET /health
+**Service Health Check**
+
+Comprehensive health check with database status.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-07-09T10:30:00Z",
+  "components": {
+    "workflow": "healthy",
+    "database": "healthy"
+  },
+  "uptime": "2h 45m 30s"
+}
+```
+
+#### GET /health/database
+**Database Health Check**
+
+Detailed database connectivity and performance metrics.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "connection_pool": {
+    "active_connections": 5,
+    "idle_connections": 10,
+    "max_connections": 20
+  },
+  "response_time_ms": 12.5,
+  "last_error": null
+}
+```
+
+#### GET /metrics
+**Application Metrics**
+
+Returns application metrics for monitoring and observability.
+
+**Response:**
+```json
+{
+  "uptime_seconds": 9930,
+  "workflow_status": "healthy",
+  "database_status": "healthy",
+  "processed_videos_count": 150,
+  "average_processing_time": 2.8
+}
+```
+
+### 📚 History API Endpoints
+
+#### GET /api/v1/history/videos
+**List Processed Videos**
 
 Lists all processed videos with pagination and filtering capabilities.
 
 **Query Parameters:**
-- `page` (int): Page number (default: 1)
+- `page` (int): Page number (1-based, default: 1)
 - `page_size` (int): Items per page, 1-100 (default: 20)
-- `sort_by` (str): Sort field - "created_at", "title", "duration" (default: "created_at")
-- `sort_order` (str): "asc" or "desc" (default: "desc")
-- `date_from` (str): Filter videos from date (ISO format)
-- `date_to` (str): Filter videos to date (ISO format)
-- `keywords` (str): Filter by keywords (comma-separated)
+- `sort_by` (str): Sort field - "created_at", "updated_at", "title" (default: "created_at")
+- `sort_order` (str): Sort order - "asc", "desc" (default: "desc")
+- `date_from` (date): Start date filter (YYYY-MM-DD format)
+- `date_to` (date): End date filter (YYYY-MM-DD format)
+- `keywords` (str): Keywords to search for (comma-separated)
 - `title_search` (str): Search in video titles
 
 **Example Response:**
@@ -235,7 +318,7 @@ Lists all processed videos with pagination and filtering capabilities.
 {
   "videos": [
     {
-      "id": "uuid",
+      "id": "uuid-here",
       "video_id": "dQw4w9WgXcQ",
       "title": "Video Title",
       "duration": "PT25M30S",
@@ -256,14 +339,18 @@ Lists all processed videos with pagination and filtering capabilities.
 }
 ```
 
-#### Endpoint: GET /api/v1/history/videos/{video_id}
+#### GET /api/v1/history/videos/{video_id}
+**Get Video Details**
 
 Retrieves detailed information for a specific processed video.
+
+**Path Parameters:**
+- `video_id` (int): Video ID from the database
 
 **Example Response:**
 ```json
 {
-  "id": "uuid",
+  "id": "uuid-here",
   "video_id": "dQw4w9WgXcQ",
   "title": "Complete Video Title",
   "duration": "PT25M30S",
@@ -290,6 +377,115 @@ Retrieves detailed information for a specific processed video.
     "workflow_params": {},
     "status": "completed",
     "error_info": null
+  }
+}
+```
+
+#### GET /api/v1/history/statistics
+**Get Video Statistics**
+
+Returns statistics about processed videos.
+
+**Response:**
+```json
+{
+  "total_videos": 150,
+  "completed_videos": 145,
+  "failed_videos": 5,
+  "completion_rate": 96.7,
+  "average_processing_time": 2.8,
+  "processing_status_counts": {
+    "completed": 145,
+    "failed": 5,
+    "processing": 0
+  }
+}
+```
+
+#### GET /api/v1/history/health
+**History API Health Check**
+
+Health check endpoint specifically for the history API.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "service": "history_api",
+  "database_connection": "healthy"
+}
+```
+
+### 📖 Documentation Endpoints
+
+#### GET /api/docs
+**Interactive API Documentation**
+
+FastAPI's automatically generated Swagger UI for interactive API documentation and testing.
+
+#### GET /api/redoc
+**ReDoc API Documentation**
+
+Alternative API documentation interface using ReDoc with a clean, responsive design.
+
+### 🔧 Usage Examples
+
+**Basic video summarization:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/summarize" \
+  -H "Content-Type: application/json" \
+  -d '{"youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
+```
+
+**Get paginated video history:**
+```bash
+curl "http://localhost:8000/api/v1/history/videos?page=1&page_size=10&sort_by=created_at&sort_order=desc"
+```
+
+**Search videos by keywords:**
+```bash
+curl "http://localhost:8000/api/v1/history/videos?keywords=python,tutorial&title_search=introduction"
+```
+
+**Get video details:**
+```bash
+curl "http://localhost:8000/api/v1/history/videos/123"
+```
+
+**Check system health:**
+```bash
+curl "http://localhost:8000/health"
+curl "http://localhost:8000/health/database"
+```
+
+### 🔒 Authentication & Security
+
+Currently, the API does not require authentication. For production deployment, consider implementing:
+
+- API key authentication
+- Rate limiting
+- Input validation and sanitization
+- CORS configuration
+- HTTPS enforcement
+
+### 📊 Response Format
+
+All API responses follow a consistent JSON format with appropriate HTTP status codes:
+
+- **200 OK**: Successful request
+- **400 Bad Request**: Invalid input or request format
+- **404 Not Found**: Resource not found
+- **422 Unprocessable Entity**: Validation error
+- **500 Internal Server Error**: Server error
+
+Error responses include detailed error information:
+```json
+{
+  "error": "Invalid YouTube URL",
+  "message": "The provided URL is not a valid YouTube video URL",
+  "details": {
+    "url": "invalid-url",
+    "code": "INVALID_URL"
   }
 }
 ```

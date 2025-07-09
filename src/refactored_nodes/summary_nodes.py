@@ -55,7 +55,7 @@ class TimestampNode(BaseProcessingNode):
             
             # Validate transcript data
             raw_transcript = transcript_data.get('raw_transcript', [])
-            video_id = transcript_data.get('video_id', '')
+            video_id = store.get('video_id', transcript_data.get('video_id', ''))
             
             if not raw_transcript:
                 raise ValueError("No raw transcript data available for timestamp generation")
@@ -67,7 +67,7 @@ class TimestampNode(BaseProcessingNode):
             video_title = video_metadata.get('title', 'Unknown')
             video_duration = video_metadata.get('duration_seconds', 0)
             
-            if video_duration <= 0:
+            if video_duration is None or video_duration <= 0:
                 self.logger.warning("Video duration not available, proceeding anyway")
             
             # Initialize Smart LLM client
@@ -216,7 +216,7 @@ class TimestampNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    async def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process timestamps and update store.
         
@@ -257,6 +257,7 @@ class TimestampNode(BaseProcessingNode):
             
             # Prepare store data
             store_data = {
+                'timestamps': timestamps,  # Store at top level for API compatibility
                 'timestamp_data': {
                     'timestamps': timestamps,
                     'sorted_by_importance': sorted_timestamps,
@@ -301,8 +302,8 @@ class TimestampNode(BaseProcessingNode):
             # Save timestamped segments to database if video service is available
             if self.video_service:
                 try:
-                    # Save timestamped segments data as JSON
-                    await self.video_service.save_timestamped_segments(
+                    # Save timestamps directly (now synchronous)
+                    self.video_service.save_timestamped_segments(
                         video_id=video_id,
                         segments_data={
                             'timestamps': timestamps,
@@ -320,7 +321,8 @@ class TimestampNode(BaseProcessingNode):
                     self.logger.info(f"Timestamped segments saved to database for video: {video_id}")
                     
                 except Exception as db_error:
-                    self.logger.error(f"Failed to save timestamped segments to database: {str(db_error)}")
+                    self.logger.warning(f"Failed to save timestamped segments to database: {str(db_error)}")
+                    post_result['database_saved'] = False
                     post_result['database_error'] = str(db_error)
             
             self.logger.info(f"Timestamp post-processing successful for video {video_id}")
@@ -563,8 +565,18 @@ Do not include any other text or explanations."""
                 match = re.match(pattern, line.strip())
                 if match:
                     timestamp_seconds = float(match.group(1))
-                    rating = int(match.group(2)) if len(match.groups()) >= 3 and match.group(2).isdigit() else 5
-                    description = match.group(-1).strip()  # Always the last group
+                    groups = match.groups()
+                    
+                    # Handle different patterns with different group counts
+                    if len(groups) >= 3 and groups[1] and groups[1].isdigit():
+                        rating = int(groups[1])
+                        description = groups[2].strip()
+                    elif len(groups) >= 2:
+                        rating = 5  # Default rating
+                        description = groups[1].strip()
+                    else:
+                        rating = 5
+                        description = groups[0].strip() if groups else "No description"
                     
                     # Generate YouTube URL with timestamp
                     youtube_url = f"https://www.youtube.com/watch?v={video_id}&t={int(timestamp_seconds)}s"

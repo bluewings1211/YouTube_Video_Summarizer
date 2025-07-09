@@ -57,7 +57,7 @@ class SummarizationNode(BaseProcessingNode):
             
             # Check transcript length
             word_count = len(transcript_text.split())
-            if word_count < 50:
+            if word_count < 20:
                 raise ValueError(f"Transcript too short for summarization ({word_count} words)")
             
             # Initialize Smart LLM client
@@ -70,7 +70,7 @@ class SummarizationNode(BaseProcessingNode):
                 'transcript_text': transcript_text,
                 'original_word_count': word_count,
                 'target_word_count': self.target_word_count,
-                'video_id': transcript_data.get('video_id', 'unknown'),
+                'video_id': store.get('video_id', transcript_data.get('video_id', 'unknown')),
                 'video_title': store.get('video_metadata', {}).get('title', 'Unknown'),
                 'prep_timestamp': datetime.utcnow().isoformat(),
                 'prep_status': 'success'
@@ -209,7 +209,7 @@ class SummarizationNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    async def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process summary and update store.
         
@@ -252,6 +252,7 @@ class SummarizationNode(BaseProcessingNode):
             
             # Prepare store data
             store_data = {
+                'summary_text': summary_text,  # Store at top level for API compatibility
                 'summary_data': {
                     'summary_text': summary_text,
                     'word_count': summary_word_count,
@@ -293,8 +294,8 @@ class SummarizationNode(BaseProcessingNode):
                 try:
                     processing_time = exec_result.get('processing_duration', 0)
                     
-                    # Save summary
-                    await self.video_service.save_summary(
+                    # Save summary directly (now synchronous)
+                    self.video_service.save_summary(
                         video_id=video_id,
                         content=summary_text,
                         processing_time=processing_time
@@ -304,7 +305,8 @@ class SummarizationNode(BaseProcessingNode):
                     self.logger.info(f"Summary saved to database for video: {video_id}")
                     
                 except Exception as db_error:
-                    self.logger.error(f"Failed to save summary to database: {str(db_error)}")
+                    self.logger.warning(f"Failed to save summary to database: {str(db_error)}")
+                    post_result['database_saved'] = False
                     post_result['database_error'] = str(db_error)
             
             self.logger.info(f"Summary post-processing successful for video {video_id}")
@@ -408,7 +410,7 @@ class KeywordExtractionNode(BaseProcessingNode):
             
             # Validate text length
             word_count = len(extraction_text.split())
-            if word_count < 20:
+            if word_count < 10:
                 raise ValueError(f"Text too short for keyword extraction ({word_count} words)")
             
             # Initialize Smart LLM client
@@ -425,7 +427,7 @@ class KeywordExtractionNode(BaseProcessingNode):
                 'extraction_text': extraction_text,
                 'text_source': 'summary' if summary_text else 'transcript',
                 'text_word_count': word_count,
-                'video_id': transcript_data.get('video_id', 'unknown'),
+                'video_id': store.get('video_id', transcript_data.get('video_id', 'unknown')),
                 'video_title': video_title,
                 'target_keyword_count': self.default_keyword_count,
                 'prep_timestamp': datetime.utcnow().isoformat(),
@@ -555,7 +557,7 @@ class KeywordExtractionNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    async def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process keywords and update store.
         
@@ -597,8 +599,17 @@ class KeywordExtractionNode(BaseProcessingNode):
                 except Exception as e:
                     self.logger.debug(f"Could not apply Chinese encoding to keywords: {str(e)}")
             
-            # Prepare store data
+            # Prepare store data - extract keyword strings for API compatibility
+            keyword_strings = []
+            if keywords:
+                for kw in keywords:
+                    if isinstance(kw, dict) and 'keyword' in kw:
+                        keyword_strings.append(kw['keyword'])
+                    elif isinstance(kw, str):
+                        keyword_strings.append(kw)
+            
             store_data = {
+                'keywords': keyword_strings,  # Store as string array for API compatibility
                 'keywords_data': {
                     'keywords': keywords,
                     'count': keyword_count,
@@ -636,11 +647,11 @@ class KeywordExtractionNode(BaseProcessingNode):
             # Save keywords to database if video service is available
             if self.video_service:
                 try:
-                    # Save keywords data as JSON
-                    await self.video_service.save_keywords(
+                    # Save keywords directly (now synchronous)
+                    self.video_service.save_keywords(
                         video_id=video_id,
                         keywords_data={
-                            'keywords': keywords,
+                            'keywords': keywords,  # Original keyword objects with metadata
                             'count': keyword_count,
                             'extracted_at': exec_result.get('exec_timestamp')
                         }
@@ -650,7 +661,8 @@ class KeywordExtractionNode(BaseProcessingNode):
                     self.logger.info(f"Keywords saved to database for video: {video_id}")
                     
                 except Exception as db_error:
-                    self.logger.error(f"Failed to save keywords to database: {str(db_error)}")
+                    self.logger.warning(f"Failed to save keywords to database: {str(db_error)}")
+                    post_result['database_saved'] = False
                     post_result['database_error'] = str(db_error)
             
             self.logger.info(f"Keywords post-processing successful for video {video_id}")

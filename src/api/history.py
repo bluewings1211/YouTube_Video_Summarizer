@@ -10,9 +10,9 @@ from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, validator
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-from ..database.connection import get_database_session
+from ..database.connection import get_database_session_dependency
 from ..services.history_service import HistoryService, get_history_service, HistoryServiceError
 from ..database.models import Video, Transcript, Summary, Keyword, TimestampedSegment, ProcessingMetadata
 
@@ -227,14 +227,14 @@ async def get_videos(
                 else:
                     search_query = title_search
             
-            video_items, pagination_info = await history_service.search_videos(
+            video_items, pagination_info = history_service.search_videos(
                 query=search_query,
                 page=page,
                 page_size=page_size
             )
         elif date_from or date_to:
             # Use date filtering
-            video_items, pagination_info = await history_service.filter_videos_by_date(
+            video_items, pagination_info = history_service.filter_videos_by_date(
                 date_from=date_from,
                 date_to=date_to,
                 page=page,
@@ -242,7 +242,7 @@ async def get_videos(
             )
         else:
             # Use regular pagination
-            video_items, pagination_info = await history_service.get_videos_paginated(
+            video_items, pagination_info = history_service.get_videos_paginated(
                 page=page,
                 page_size=page_size,
                 sort_by=sort_by,
@@ -311,7 +311,7 @@ async def get_video_detail(
     """
     try:
         # Get video with all related data
-        video = await history_service.get_video_by_id(video_id)
+        video = history_service.get_video_by_id(video_id)
         
         if not video:
             raise HTTPException(
@@ -399,7 +399,7 @@ async def get_video_statistics(
     - Completion rate
     """
     try:
-        statistics = await history_service.get_video_statistics()
+        statistics = history_service.get_video_statistics()
         
         return VideoStatisticsResponse(
             total_videos=statistics["total_videos"],

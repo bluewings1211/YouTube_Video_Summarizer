@@ -1,26 +1,22 @@
 """
 Database connection management for YouTube Summarizer application.
-Handles async database sessions, connection pooling, and health checks.
+Handles synchronous database sessions, connection pooling, and health checks.
 """
 
-import asyncio
 import logging
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional, Dict, Any
-from sqlalchemy.ext.asyncio import (
-    AsyncSession, async_sessionmaker, create_async_engine, AsyncEngine
-)
+from contextlib import contextmanager
+from typing import Generator, Optional, Dict, Any
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import create_engine, Engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.pool import QueuePool
-from sqlalchemy import text
 from .models import Base
 from ..config import settings
 
 logger = logging.getLogger(__name__)
 
 # Global engine and session factory
-_engine: Optional[AsyncEngine] = None
-_session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+_engine: Optional[Engine] = None
+_session_factory: Optional[sessionmaker[Session]] = None
 
 
 def get_database_url() -> str:
@@ -28,32 +24,37 @@ def get_database_url() -> str:
     return settings.database_url
 
 
-def create_database_engine() -> AsyncEngine:
-    """Create and configure async database engine."""
+def create_database_engine() -> Engine:
+    """Create and configure synchronous database engine."""
     database_url = get_database_url()
     
-    # Engine configuration
+    # Convert asyncpg URL to psycopg2 URL for synchronous operations
+    if database_url.startswith('postgresql+asyncpg://'):
+        database_url = database_url.replace('postgresql+asyncpg://', 'postgresql://')
+    
+    # Engine configuration for synchronous engine
     engine_config = {
-        'url': database_url,
         'echo': settings.database_echo,
         'echo_pool': settings.database_echo_pool,
         'pool_size': settings.database_pool_size,
         'max_overflow': settings.database_max_overflow,
         'pool_timeout': settings.database_pool_timeout,
         'pool_recycle': settings.database_pool_recycle,
-        'poolclass': QueuePool,
-        'pool_pre_ping': True,  # Validate connections before use
-        'pool_reset_on_return': 'commit',  # Reset connections on return
+        'pool_pre_ping': True,
+        'pool_reset_on_return': 'commit',
+        'connect_args': {
+            'application_name': 'youtube_summarizer'
+        }
     }
     
-    # Create async engine
-    engine = create_async_engine(**engine_config)
+    # Create synchronous engine
+    engine = create_engine(database_url, **engine_config)
     
     logger.info(f"Created database engine with URL: {database_url.split('@')[0]}@***")
     return engine
 
 
-def get_database_engine() -> AsyncEngine:
+def get_database_engine() -> Engine:
     """Get or create the global database engine."""
     global _engine
     if _engine is None:
@@ -61,23 +62,22 @@ def get_database_engine() -> AsyncEngine:
     return _engine
 
 
-def create_session_factory() -> async_sessionmaker[AsyncSession]:
-    """Create async session factory."""
+def create_session_factory() -> sessionmaker[Session]:
+    """Create synchronous session factory."""
     engine = get_database_engine()
     
     # Session configuration
     session_config = {
         'bind': engine,
-        'class_': AsyncSession,
         'expire_on_commit': False,
         'autocommit': False,
         'autoflush': True,
     }
     
-    return async_sessionmaker(**session_config)
+    return sessionmaker(**session_config)
 
 
-def get_session_factory() -> async_sessionmaker[AsyncSession]:
+def get_session_factory() -> sessionmaker[Session]:
     """Get or create the global session factory."""
     global _session_factory
     if _session_factory is None:
@@ -85,43 +85,43 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-@asynccontextmanager
-async def get_database_session() -> AsyncGenerator[AsyncSession, None]:
+@contextmanager
+def get_database_session() -> Generator[Session, None, None]:
     """
-    Get async database session with automatic cleanup.
+    Get synchronous database session with automatic cleanup.
     
     Usage:
-        async with get_database_session() as session:
-            result = await session.execute(query)
+        with get_database_session() as session:
+            result = session.execute(query)
     """
     session_factory = get_session_factory()
     session = session_factory()
     
     try:
         yield session
-        await session.commit()
+        session.commit()
     except Exception as e:
-        await session.rollback()
+        session.rollback()
         logger.error(f"Database session error: {e}")
         raise
     finally:
-        await session.close()
+        session.close()
 
 
-async def get_database_session_dependency() -> AsyncGenerator[AsyncSession, None]:
+def get_database_session_dependency() -> Generator[Session, None, None]:
     """
     FastAPI dependency for database sessions.
     
     Usage:
         @app.get("/")
-        async def endpoint(session: AsyncSession = Depends(get_database_session_dependency)):
+        def endpoint(session: Session = Depends(get_database_session_dependency)):
             # Use session here
     """
-    async with get_database_session() as session:
+    with get_database_session() as session:
         yield session
 
 
-async def init_database() -> bool:
+def init_database() -> bool:
     """
     Initialize database connection and create tables if needed.
     
@@ -132,15 +132,15 @@ async def init_database() -> bool:
         engine = get_database_engine()
         
         # Test connection
-        async with engine.begin() as conn:
+        with engine.begin() as conn:
             # Check if tables exist by trying to query one
             try:
-                await conn.execute(text("SELECT 1 FROM videos LIMIT 1"))
+                conn.execute(text("SELECT 1 FROM videos LIMIT 1"))
                 logger.info("Database tables already exist")
             except SQLAlchemyError:
                 # Tables don't exist, create them
                 logger.info("Creating database tables...")
-                await conn.run_sync(Base.metadata.create_all)
+                Base.metadata.create_all(bind=engine)
                 logger.info("Database tables created successfully")
         
         logger.info("Database initialized successfully")
@@ -151,7 +151,7 @@ async def init_database() -> bool:
         return False
 
 
-async def check_database_health() -> Dict[str, Any]:
+def check_database_health() -> Dict[str, Any]:
     """
     Check database health and connection status.
     
@@ -173,8 +173,8 @@ async def check_database_health() -> Dict[str, Any]:
         engine = get_database_engine()
         
         # Test database connection
-        async with engine.begin() as conn:
-            result = await conn.execute(text("SELECT 1 AS health_check"))
+        with engine.begin() as conn:
+            result = conn.execute(text("SELECT 1 AS health_check"))
             row = result.fetchone()
             
             if row and row[0] == 1:
@@ -207,13 +207,13 @@ async def check_database_health() -> Dict[str, Any]:
     return health_info
 
 
-async def close_database_connections() -> None:
+def close_database_connections() -> None:
     """Close all database connections and cleanup resources."""
     global _engine, _session_factory
     
     try:
         if _engine:
-            await _engine.dispose()
+            _engine.dispose()
             logger.info("Database engine disposed")
         
         _engine = None
@@ -225,17 +225,17 @@ async def close_database_connections() -> None:
         logger.error(f"Error closing database connections: {e}")
 
 
-async def reset_database_connections() -> bool:
+def reset_database_connections() -> bool:
     """Reset database connections (useful for configuration changes)."""
     try:
-        await close_database_connections()
+        close_database_connections()
         
         # Recreate connections
         get_database_engine()
         get_session_factory()
         
         # Test new connections
-        health_status = await check_database_health()
+        health_status = check_database_health()
         if health_status['status'] == 'healthy':
             logger.info("Database connections reset successfully")
             return True
@@ -257,13 +257,13 @@ class DatabaseManager:
     def __init__(self):
         self._initialized = False
     
-    async def initialize(self) -> bool:
+    def initialize(self) -> bool:
         """Initialize the database manager."""
         if self._initialized:
             return True
         
         try:
-            success = await init_database()
+            success = init_database()
             if success:
                 self._initialized = True
                 logger.info("DatabaseManager initialized successfully")
@@ -272,22 +272,22 @@ class DatabaseManager:
             logger.error(f"Failed to initialize DatabaseManager: {e}")
             return False
     
-    async def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> Dict[str, Any]:
         """Perform database health check."""
-        return await check_database_health()
+        return check_database_health()
     
-    @asynccontextmanager
-    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
+    @contextmanager
+    def get_session(self) -> Generator[Session, None, None]:
         """Get database session through manager."""
         if not self._initialized:
             raise RuntimeError("DatabaseManager not initialized. Call initialize() first.")
         
-        async with get_database_session() as session:
+        with get_database_session() as session:
             yield session
     
-    async def close(self) -> None:
+    def close(self) -> None:
         """Close database manager and cleanup."""
-        await close_database_connections()
+        close_database_connections()
         self._initialized = False
 
 
@@ -296,7 +296,7 @@ db_manager = DatabaseManager()
 
 
 # Utility functions for common database operations
-async def execute_query(query: str, parameters: Optional[Dict[str, Any]] = None) -> Any:
+def execute_query(query: str, parameters: Optional[Dict[str, Any]] = None) -> Any:
     """
     Execute a raw SQL query with optional parameters.
     
@@ -307,15 +307,15 @@ async def execute_query(query: str, parameters: Optional[Dict[str, Any]] = None)
     Returns:
         Query result
     """
-    async with get_database_session() as session:
+    with get_database_session() as session:
         if parameters:
-            result = await session.execute(text(query), parameters)
+            result = session.execute(text(query), parameters)
         else:
-            result = await session.execute(text(query))
+            result = session.execute(text(query))
         return result
 
 
-async def get_table_count(table_name: str) -> int:
+def get_table_count(table_name: str) -> int:
     """
     Get count of records in a table.
     
@@ -326,7 +326,7 @@ async def get_table_count(table_name: str) -> int:
         Number of records in the table
     """
     try:
-        result = await execute_query(f"SELECT COUNT(*) FROM {table_name}")
+        result = execute_query(f"SELECT COUNT(*) FROM {table_name}")
         count = result.scalar()
         return count if count is not None else 0
     except Exception as e:
@@ -334,7 +334,7 @@ async def get_table_count(table_name: str) -> int:
         return 0
 
 
-async def get_database_info() -> Dict[str, Any]:
+def get_database_info() -> Dict[str, Any]:
     """
     Get comprehensive database information.
     
@@ -342,7 +342,7 @@ async def get_database_info() -> Dict[str, Any]:
         Dictionary with database statistics and information
     """
     info = {
-        'health': await check_database_health(),
+        'health': check_database_health(),
         'tables': {},
         'total_records': 0,
     }
@@ -352,7 +352,7 @@ async def get_database_info() -> Dict[str, Any]:
     
     for table_name in table_names:
         try:
-            count = await get_table_count(table_name)
+            count = get_table_count(table_name)
             info['tables'][table_name] = count
             info['total_records'] += count
         except Exception as e:

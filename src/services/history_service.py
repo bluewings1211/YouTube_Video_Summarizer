@@ -8,7 +8,7 @@ including pagination, filtering, and search capabilities.
 import logging
 from datetime import datetime, date
 from typing import Optional, Dict, Any, List, Tuple
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload, joinedload
 from sqlalchemy import select, func, and_, or_, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -23,7 +23,7 @@ from ..database.exceptions import (
     DatabaseError, DatabaseConnectionError, DatabaseQueryError,
     classify_database_error
 )
-from ..database.connection import get_database_session
+from ..database.connection import get_database_session_dependency
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class HistoryService:
     with pagination, filtering, and search capabilities.
     """
 
-    def __init__(self, session: Optional[AsyncSession] = None):
+    def __init__(self, session: Optional[Session] = None):
         """
         Initialize the history service.
         
@@ -79,7 +79,7 @@ class HistoryService:
         self._session = session
         self._logger = logging.getLogger(f"{__name__}.HistoryService")
 
-    async def _get_session(self) -> AsyncSession:
+    def _get_session(self) -> Session:
         """Get database session (internal method)."""
         if self._session:
             return self._session
@@ -87,7 +87,7 @@ class HistoryService:
             # This should be used with dependency injection
             raise HistoryServiceError("No database session provided")
 
-    async def get_videos_paginated(
+    def get_videos_paginated(
         self,
         page: int = 1,
         page_size: int = 20,
@@ -110,7 +110,7 @@ class HistoryService:
             HistoryServiceError: If query fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Validate parameters
             if page < 1:
@@ -140,7 +140,7 @@ class HistoryService:
             
             # Get total count
             count_query = select(func.count(Video.id))
-            count_result = await session.execute(count_query)
+            count_result = session.execute(count_query)
             total_items = count_result.scalar()
             
             # Calculate pagination
@@ -151,7 +151,7 @@ class HistoryService:
             query = query.offset(offset).limit(page_size)
             
             # Execute query
-            result = await session.execute(query)
+            result = session.execute(query)
             videos = result.scalars().all()
             
             # Convert to VideoHistoryItem objects
@@ -200,7 +200,7 @@ class HistoryService:
             self._logger.error(f"Unexpected error getting paginated videos: {e}")
             raise HistoryServiceError(f"Unexpected error: {e}")
 
-    async def get_video_by_id(self, video_id: int) -> Optional[Video]:
+    def get_video_by_id(self, video_id: int) -> Optional[Video]:
         """
         Get detailed video information by database ID.
         
@@ -214,7 +214,7 @@ class HistoryService:
             HistoryServiceError: If query fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Query with all related data
             query = select(Video).options(
@@ -225,7 +225,7 @@ class HistoryService:
                 selectinload(Video.processing_metadata)
             ).where(Video.id == video_id)
             
-            result = await session.execute(query)
+            result = session.execute(query)
             video = result.scalar_one_or_none()
             
             if video:
@@ -243,7 +243,7 @@ class HistoryService:
             self._logger.error(f"Unexpected error getting video by ID: {e}")
             raise HistoryServiceError(f"Unexpected error: {e}")
 
-    async def search_videos(
+    def search_videos(
         self,
         query: str,
         page: int = 1,
@@ -264,7 +264,7 @@ class HistoryService:
             HistoryServiceError: If search fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Validate parameters
             if page < 1:
@@ -298,7 +298,7 @@ class HistoryService:
                     Video.summaries.any(Summary.content.ilike(search_term))
                 )
             )
-            count_result = await session.execute(count_query)
+            count_result = session.execute(count_query)
             total_items = count_result.scalar()
             
             # Calculate pagination
@@ -309,7 +309,7 @@ class HistoryService:
             search_query = search_query.offset(offset).limit(page_size)
             
             # Execute search
-            result = await session.execute(search_query)
+            result = session.execute(search_query)
             videos = result.scalars().all()
             
             # Convert to VideoHistoryItem objects
@@ -358,7 +358,7 @@ class HistoryService:
             self._logger.error(f"Unexpected error searching videos: {e}")
             raise HistoryServiceError(f"Unexpected error: {e}")
 
-    async def filter_videos_by_date(
+    def filter_videos_by_date(
         self,
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
@@ -381,7 +381,7 @@ class HistoryService:
             HistoryServiceError: If filtering fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Validate parameters
             if page < 1:
@@ -416,7 +416,7 @@ class HistoryService:
             if date_conditions:
                 count_query = count_query.where(and_(*date_conditions))
             
-            count_result = await session.execute(count_query)
+            count_result = session.execute(count_query)
             total_items = count_result.scalar()
             
             # Calculate pagination
@@ -427,7 +427,7 @@ class HistoryService:
             query = query.offset(offset).limit(page_size)
             
             # Execute query
-            result = await session.execute(query)
+            result = session.execute(query)
             videos = result.scalars().all()
             
             # Convert to VideoHistoryItem objects
@@ -499,7 +499,7 @@ class HistoryService:
             has_previous=page > 1
         )
 
-    async def get_video_statistics(self) -> Dict[str, Any]:
+    def get_video_statistics(self) -> Dict[str, Any]:
         """
         Get statistics about processed videos.
         
@@ -510,25 +510,25 @@ class HistoryService:
             HistoryServiceError: If query fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Total videos
             total_videos_query = select(func.count(Video.id))
-            total_videos_result = await session.execute(total_videos_query)
+            total_videos_result = session.execute(total_videos_query)
             total_videos = total_videos_result.scalar()
             
             # Videos with transcripts
             videos_with_transcripts_query = select(func.count(Video.id.distinct())).where(
                 Video.transcripts.any()
             )
-            videos_with_transcripts_result = await session.execute(videos_with_transcripts_query)
+            videos_with_transcripts_result = session.execute(videos_with_transcripts_query)
             videos_with_transcripts = videos_with_transcripts_result.scalar()
             
             # Videos with summaries
             videos_with_summaries_query = select(func.count(Video.id.distinct())).where(
                 Video.summaries.any()
             )
-            videos_with_summaries_result = await session.execute(videos_with_summaries_query)
+            videos_with_summaries_result = session.execute(videos_with_summaries_query)
             videos_with_summaries = videos_with_summaries_result.scalar()
             
             # Processing status counts
@@ -536,7 +536,7 @@ class HistoryService:
                 ProcessingMetadata.status,
                 func.count(ProcessingMetadata.status)
             ).group_by(ProcessingMetadata.status)
-            status_counts_result = await session.execute(status_counts_query)
+            status_counts_result = session.execute(status_counts_query)
             status_counts = dict(status_counts_result.fetchall())
             
             statistics = {
@@ -562,7 +562,7 @@ class HistoryService:
 
 
 # Dependency injection function for FastAPI
-def get_history_service(session: AsyncSession = Depends(get_database_session)) -> HistoryService:
+def get_history_service(session: Session = Depends(get_database_session_dependency)) -> HistoryService:
     """
     Get HistoryService instance for dependency injection.
     

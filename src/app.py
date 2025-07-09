@@ -28,6 +28,7 @@ try:
     )
     from .utils.validators import validate_youtube_url_detailed, URLValidationResult
     from .database import db_manager, check_database_health, get_database_session
+    from .database.connection import get_database_session_dependency
 except ImportError:
     # For testing - try absolute imports
     try:
@@ -39,6 +40,7 @@ except ImportError:
         )
         from utils.validators import validate_youtube_url_detailed, URLValidationResult
         from database import db_manager, check_database_health, get_database_session
+        from database.connection import get_database_session_dependency
     except ImportError:
         # Create mock implementations for testing
         class YouTubeSummarizerFlow:
@@ -140,11 +142,7 @@ async def lifespan(app: FastAPI):
     try:
         # Create video service for database operations
         from .services.video_service import VideoService
-        from .database.connection import get_database_session
-        
-        # Note: In production, the video service will be properly injected with session
-        # For now, we pass None and let dependency injection handle it in the workflow
-        video_service = None  # Will be properly injected during request processing
+        video_service = VideoService()  # Will use context manager for sessions
         
         # Create workflow instance with production configuration
         workflow_instance = YouTubeSummarizerFlow(
@@ -596,7 +594,7 @@ async def root():
 async def summarize_video(
     request: SummarizeRequest, 
     http_request: Request,
-    db_session = Depends(get_database_session)
+    db_session = Depends(get_database_session_dependency)
 ):
     """
     Summarize a YouTube video with AI-powered analysis.
@@ -658,9 +656,25 @@ async def summarize_video(
         
         # Execute workflow
         try:
-            logger.info(f"[{request_id}] About to call workflow_instance.run() with input_data: {input_data}")
+            # Log workflow start with essential info only
+            input_summary = {
+                'youtube_url': input_data.get('youtube_url', 'unknown'),
+                'request_id': input_data.get('request_id', 'unknown'),
+                'processing_start_time': input_data.get('processing_start_time', 'unknown')
+            }
+            logger.info(f"[{request_id}] About to call workflow_instance.run() with input_data: {input_summary}")
             workflow_result = workflow_instance.run(input_data)
-            logger.info(f"[{request_id}] Workflow returned result: {workflow_result}")
+            # Log workflow completion with summary instead of full result
+            workflow_data = workflow_result.get('data', {})
+            result_summary = {
+                'video_id': workflow_data.get('video_id', 'unknown'),
+                'title': workflow_data.get('title', 'unknown')[:50] + '...' if len(workflow_data.get('title', '')) > 50 else workflow_data.get('title', 'unknown'),
+                'processing_time': time.time() - start_time,
+                'has_summary': bool(workflow_data.get('summary')),
+                'timestamped_segments_count': len(workflow_data.get('timestamps', [])),
+                'keywords_count': len(workflow_data.get('keywords', []))
+            }
+            logger.info(f"[{request_id}] Workflow returned result: {result_summary}")
         except Exception as workflow_error:
             logger.error(f"[{request_id}] Workflow execution failed: {str(workflow_error)}")
             
@@ -798,6 +812,18 @@ async def summarize_video(
                     importance_rating=importance
                 ))
         
+        # Process keywords - convert from objects to strings
+        keywords_data = workflow_data.get('keywords', [])
+        if keywords_data and isinstance(keywords_data, list) and len(keywords_data) > 0:
+            if isinstance(keywords_data[0], dict):
+                # Extract keyword strings from objects
+                keywords = [item.get('keyword', '') for item in keywords_data if item.get('keyword')]
+            else:
+                # Already strings
+                keywords = keywords_data
+        else:
+            keywords = []
+        
         # Prepare response
         response = SummarizeResponse(
             video_id=workflow_data.get('video_id', ''),
@@ -805,7 +831,7 @@ async def summarize_video(
             duration=workflow_data.get('duration', 0),
             summary=workflow_data.get('summary', ''),
             timestamped_segments=timestamped_segments,
-            keywords=workflow_data.get('keywords', []),
+            keywords=keywords,
             processing_time=processing_time
         )
         

@@ -8,8 +8,7 @@ including saving transcripts, summaries, keywords, and metadata.
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select, update, delete
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, TimeoutError
 
@@ -41,7 +40,7 @@ class VideoService:
     and manage video data in the database.
     """
 
-    def __init__(self, session: Optional[AsyncSession] = None, max_retries: int = 3, retry_delay: float = 1.0):
+    def __init__(self, session: Optional[Session] = None, max_retries: int = 3, retry_delay: float = 1.0):
         """
         Initialize the video service.
         
@@ -55,15 +54,15 @@ class VideoService:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
-    async def _get_session(self) -> AsyncSession:
+    def _get_session(self) -> Session:
         """Get database session (internal method)."""
         if self._session:
             return self._session
         else:
-            # This should be used with dependency injection
-            raise VideoServiceError("No database session provided")
+            # This method is deprecated - use context manager instead
+            raise VideoServiceError("No database session provided. Use context manager for database operations.")
 
-    async def _retry_database_operation(self, operation, *args, **kwargs):
+    def _retry_database_operation(self, operation, *args, **kwargs):
         """
         Retry a database operation with exponential backoff.
         
@@ -78,14 +77,14 @@ class VideoService:
         Raises:
             DatabaseError: If all retries fail
         """
-        import asyncio
+        import time
         
         last_error = None
         retry_count = 0
         
         while retry_count <= self.max_retries:
             try:
-                return await operation(*args, **kwargs)
+                return operation(*args, **kwargs)
                 
             except Exception as e:
                 # Classify the error
@@ -109,13 +108,13 @@ class VideoService:
                     f"retrying in {delay:.2f}s: {db_error}"
                 )
                 
-                await asyncio.sleep(delay)
+                time.sleep(delay)
         
         # All retries exhausted
         self._logger.error(f"Database operation failed after {retry_count} retries: {last_error}")
         raise last_error
 
-    async def create_video_record(
+    def create_video_record(
         self,
         video_id: str,
         title: str,
@@ -139,10 +138,10 @@ class VideoService:
         """
         with MonitoredOperation("create_video_record"):
             try:
-                session = await self._get_session()
+                session = self._get_session()
                 
                 # Check if video already exists
-                existing_video = await self.get_video_by_video_id(video_id)
+                existing_video = self.get_video_by_video_id(video_id)
                 if existing_video:
                     self._logger.info(f"Video {video_id} already exists, returning existing record")
                     return existing_video
@@ -156,8 +155,8 @@ class VideoService:
                 )
                 
                 session.add(video)
-                await session.commit()
-                await session.refresh(video)
+                session.commit()
+                session.refresh(video)
                 
                 self._logger.info(f"Created video record for {video_id}")
                 return video
@@ -196,7 +195,7 @@ class VideoService:
                 self._logger.error(f"Unexpected error creating video record: {e}")
                 raise VideoServiceError(f"Unexpected error: {e}")
 
-    async def get_video_by_video_id(self, video_id: str) -> Optional[Video]:
+    def get_video_by_video_id(self, video_id: str) -> Optional[Video]:
         """
         Get video by YouTube video ID.
         
@@ -207,10 +206,10 @@ class VideoService:
             Video object if found, None otherwise
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             stmt = select(Video).where(Video.video_id == video_id)
-            result = await session.execute(stmt)
+            result = session.execute(stmt)
             video = result.scalar_one_or_none()
             
             return video
@@ -219,7 +218,7 @@ class VideoService:
             self._logger.error(f"Database error getting video: {e}")
             raise VideoServiceError(f"Failed to get video: {e}")
 
-    async def get_video_by_id(self, video_id: int) -> Optional[Video]:
+    def get_video_by_id(self, video_id: int) -> Optional[Video]:
         """
         Get video by database ID with all related data.
         
@@ -230,7 +229,7 @@ class VideoService:
             Video object with all related data if found, None otherwise
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             stmt = select(Video).options(
                 selectinload(Video.transcripts),
@@ -240,7 +239,7 @@ class VideoService:
                 selectinload(Video.processing_metadata)
             ).where(Video.id == video_id)
             
-            result = await session.execute(stmt)
+            result = session.execute(stmt)
             video = result.scalar_one_or_none()
             
             return video
@@ -249,7 +248,7 @@ class VideoService:
             self._logger.error(f"Database error getting video by ID: {e}")
             raise VideoServiceError(f"Failed to get video by ID: {e}")
 
-    async def save_transcript(
+    def save_transcript(
         self,
         video_id: str,
         content: str,
@@ -270,10 +269,10 @@ class VideoService:
             VideoServiceError: If saving fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Get video record
-            video = await self.get_video_by_video_id(video_id)
+            video = self.get_video_by_video_id(video_id)
             if not video:
                 raise VideoServiceError(f"Video {video_id} not found")
             
@@ -285,8 +284,8 @@ class VideoService:
             )
             
             session.add(transcript)
-            await session.commit()
-            await session.refresh(transcript)
+            session.commit()
+            session.refresh(transcript)
             
             self._logger.info(f"Saved transcript for video {video_id}")
             return transcript
@@ -298,7 +297,7 @@ class VideoService:
             self._logger.error(f"Unexpected error saving transcript: {e}")
             raise VideoServiceError(f"Unexpected error: {e}")
 
-    async def save_summary(
+    def save_summary(
         self,
         video_id: str,
         content: str,
@@ -319,23 +318,56 @@ class VideoService:
             VideoServiceError: If saving fails
         """
         try:
-            session = await self._get_session()
-            
-            # Get video record
-            video = await self.get_video_by_video_id(video_id)
-            if not video:
-                raise VideoServiceError(f"Video {video_id} not found")
-            
-            # Create summary record
-            summary = Summary(
-                video_id=video.id,
-                content=content,
-                processing_time=processing_time
-            )
-            
-            session.add(summary)
-            await session.commit()
-            await session.refresh(summary)
+            # Use session context manager properly
+            if self._session:
+                # Use provided session directly (not available in current setup)
+                stmt = select(Video).where(Video.video_id == video_id)
+                result = self._session.execute(stmt)
+                video = result.scalar_one_or_none()
+                
+                if not video:
+                    raise VideoServiceError(f"Video {video_id} not found")
+                
+                summary = Summary(
+                    video_id=video.id,
+                    content=content,
+                    processing_time=processing_time
+                )
+                
+                self._session.add(summary)
+                self._session.flush()  # Don't commit here, let caller handle transaction
+                self._session.refresh(summary)
+                
+            else:
+                # Create new session using context manager
+                from ..database.connection import get_database_session
+                with get_database_session() as session:
+                    # Get video record using the session
+                    stmt = select(Video).where(Video.video_id == video_id)
+                    result = session.execute(stmt)
+                    video = result.scalar_one_or_none()
+                    
+                    if not video:
+                        # Create a basic video record if it doesn't exist
+                        video = Video(
+                            video_id=video_id,
+                            title=f"Video {video_id}",  # Will be updated with actual title later
+                            duration=0,  # Will be updated later
+                            url=f"https://www.youtube.com/watch?v={video_id}"
+                        )
+                        session.add(video)
+                        session.flush()  # Get the ID without committing yet
+                    
+                    # Create summary record
+                    summary = Summary(
+                        video_id=video.id,
+                        content=content,
+                        processing_time=processing_time
+                    )
+                    
+                    session.add(summary)
+                    session.commit()
+                    session.refresh(summary)
             
             self._logger.info(f"Saved summary for video {video_id}")
             return summary
@@ -347,7 +379,7 @@ class VideoService:
             self._logger.error(f"Unexpected error saving summary: {e}")
             raise VideoServiceError(f"Unexpected error: {e}")
 
-    async def save_keywords(
+    def save_keywords(
         self,
         video_id: str,
         keywords_data: Dict[str, Any]
@@ -366,22 +398,65 @@ class VideoService:
             VideoServiceError: If saving fails
         """
         try:
-            session = await self._get_session()
-            
-            # Get video record
-            video = await self.get_video_by_video_id(video_id)
-            if not video:
-                raise VideoServiceError(f"Video {video_id} not found")
-            
-            # Create keyword record
-            keyword = Keyword(
-                video_id=video.id,
-                keywords_json=keywords_data
-            )
-            
-            session.add(keyword)
-            await session.commit()
-            await session.refresh(keyword)
+            # Use session context manager properly
+            if self._session:
+                # Use provided session directly
+                stmt = select(Video).where(Video.video_id == video_id)
+                result = self._session.execute(stmt)
+                video = result.scalar_one_or_none()
+                
+                if not video:
+                    # Create a basic video record if it doesn't exist
+                    video = Video(
+                        video_id=video_id,
+                        title=f"Video {video_id}",
+                        duration=0,
+                        url=f"https://www.youtube.com/watch?v={video_id}"
+                    )
+                    self._session.add(video)
+                    self._session.flush()
+                
+                keyword = Keyword(
+                    video_id=video.id,
+                    keywords_json=keywords_data
+                )
+                
+                self._session.add(keyword)
+                self._session.flush()  # Don't commit here, let caller handle transaction
+                self._session.refresh(keyword)
+                
+            else:
+                # Create new session using context manager
+                from ..database.connection import get_database_session
+                with get_database_session() as session:
+                    # Get video record
+                    stmt = select(Video).where(Video.video_id == video_id)
+                    result = session.execute(stmt)
+                    video = result.scalar_one_or_none()
+                    
+                    if not video:
+                        # Create a basic video record if it doesn't exist
+                        video = Video(
+                            video_id=video_id,
+                            title=f"Video {video_id}",
+                            duration_seconds=0,
+                            description="",
+                            channel_name="Unknown",
+                            upload_date=datetime.utcnow()
+                        )
+                        session.add(video)
+                        session.flush()
+                    
+                    # Create keyword record
+                    keyword = Keyword(
+                        video_id=video.id,
+                        keywords_json=keywords_data
+                    )
+                    
+                    session.add(keyword)
+                    # Don't call commit here - let the context manager handle it
+                    session.flush()  # Flush to get the ID
+                    session.refresh(keyword)
             
             self._logger.info(f"Saved keywords for video {video_id}")
             return keyword
@@ -393,7 +468,7 @@ class VideoService:
             self._logger.error(f"Unexpected error saving keywords: {e}")
             raise VideoServiceError(f"Unexpected error: {e}")
 
-    async def save_timestamped_segments(
+    def save_timestamped_segments(
         self,
         video_id: str,
         segments_data: Dict[str, Any]
@@ -412,22 +487,65 @@ class VideoService:
             VideoServiceError: If saving fails
         """
         try:
-            session = await self._get_session()
-            
-            # Get video record
-            video = await self.get_video_by_video_id(video_id)
-            if not video:
-                raise VideoServiceError(f"Video {video_id} not found")
-            
-            # Create timestamped segment record
-            segment = TimestampedSegment(
-                video_id=video.id,
-                segments_json=segments_data
-            )
-            
-            session.add(segment)
-            await session.commit()
-            await session.refresh(segment)
+            # Use session context manager properly
+            if self._session:
+                # Use provided session directly
+                stmt = select(Video).where(Video.video_id == video_id)
+                result = self._session.execute(stmt)
+                video = result.scalar_one_or_none()
+                
+                if not video:
+                    # Create a basic video record if it doesn't exist
+                    video = Video(
+                        video_id=video_id,
+                        title=f"Video {video_id}",
+                        duration=0,
+                        url=f"https://www.youtube.com/watch?v={video_id}"
+                    )
+                    self._session.add(video)
+                    self._session.flush()
+                
+                segment = TimestampedSegment(
+                    video_id=video.id,
+                    segments_json=segments_data
+                )
+                
+                self._session.add(segment)
+                self._session.flush()  # Don't commit here, let caller handle transaction
+                self._session.refresh(segment)
+                
+            else:
+                # Create new session using context manager
+                from ..database.connection import get_database_session
+                with get_database_session() as session:
+                    # Get video record
+                    stmt = select(Video).where(Video.video_id == video_id)
+                    result = session.execute(stmt)
+                    video = result.scalar_one_or_none()
+                    
+                    if not video:
+                        # Create a basic video record if it doesn't exist
+                        video = Video(
+                            video_id=video_id,
+                            title=f"Video {video_id}",
+                            duration_seconds=0,
+                            description="",
+                            channel_name="Unknown",
+                            upload_date=datetime.utcnow()
+                        )
+                        session.add(video)
+                        session.flush()
+                    
+                    # Create timestamped segment record
+                    segment = TimestampedSegment(
+                        video_id=video.id,
+                        segments_json=segments_data
+                    )
+                    
+                    session.add(segment)
+                    # Don't call commit here - let the context manager handle it
+                    session.flush()  # Flush to get the ID
+                    session.refresh(segment)
             
             self._logger.info(f"Saved timestamped segments for video {video_id}")
             return segment
@@ -439,7 +557,7 @@ class VideoService:
             self._logger.error(f"Unexpected error saving segments: {e}")
             raise VideoServiceError(f"Unexpected error: {e}")
 
-    async def save_processing_metadata(
+    def save_processing_metadata(
         self,
         video_id: str,
         workflow_params: Optional[Dict[str, Any]] = None,
@@ -462,10 +580,10 @@ class VideoService:
             VideoServiceError: If saving fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Get video record
-            video = await self.get_video_by_video_id(video_id)
+            video = self.get_video_by_video_id(video_id)
             if not video:
                 raise VideoServiceError(f"Video {video_id} not found")
             
@@ -478,8 +596,8 @@ class VideoService:
             )
             
             session.add(metadata)
-            await session.commit()
-            await session.refresh(metadata)
+            session.commit()
+            session.refresh(metadata)
             
             self._logger.info(f"Saved processing metadata for video {video_id}")
             return metadata
@@ -491,7 +609,7 @@ class VideoService:
             self._logger.error(f"Unexpected error saving metadata: {e}")
             raise VideoServiceError(f"Unexpected error: {e}")
 
-    async def update_processing_status(
+    def update_processing_status(
         self,
         video_id: str,
         status: str,
@@ -512,10 +630,10 @@ class VideoService:
             VideoServiceError: If update fails
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Get video record
-            video = await self.get_video_by_video_id(video_id)
+            video = self.get_video_by_video_id(video_id)
             if not video:
                 raise VideoServiceError(f"Video {video_id} not found")
             
@@ -527,15 +645,15 @@ class VideoService:
                 error_info=error_info
             )
             
-            await session.execute(stmt)
-            await session.commit()
+            session.execute(stmt)
+            session.commit()
             
             # Get updated metadata
             metadata_stmt = select(ProcessingMetadata).where(
                 ProcessingMetadata.video_id == video.id
             ).order_by(ProcessingMetadata.created_at.desc())
             
-            result = await session.execute(metadata_stmt)
+            result = session.execute(metadata_stmt)
             metadata = result.scalar_one_or_none()
             
             self._logger.info(f"Updated processing status for video {video_id} to {status}")
@@ -548,7 +666,7 @@ class VideoService:
             self._logger.error(f"Unexpected error updating status: {e}")
             raise VideoServiceError(f"Unexpected error: {e}")
 
-    async def video_exists(self, video_id: str) -> bool:
+    def video_exists(self, video_id: str) -> bool:
         """
         Check if a video exists in the database.
         
@@ -559,13 +677,13 @@ class VideoService:
             True if video exists, False otherwise
         """
         try:
-            video = await self.get_video_by_video_id(video_id)
+            video = self.get_video_by_video_id(video_id)
             return video is not None
             
         except VideoServiceError:
             return False
 
-    async def get_processing_status(self, video_id: str) -> Optional[str]:
+    def get_processing_status(self, video_id: str) -> Optional[str]:
         """
         Get current processing status for a video.
         
@@ -576,10 +694,10 @@ class VideoService:
             Processing status or None if not found
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Get video record
-            video = await self.get_video_by_video_id(video_id)
+            video = self.get_video_by_video_id(video_id)
             if not video:
                 return None
             
@@ -588,7 +706,7 @@ class VideoService:
                 ProcessingMetadata.video_id == video.id
             ).order_by(ProcessingMetadata.created_at.desc())
             
-            result = await session.execute(stmt)
+            result = session.execute(stmt)
             metadata = result.scalar_one_or_none()
             
             return metadata.status if metadata else None
@@ -597,7 +715,7 @@ class VideoService:
             self._logger.error(f"Database error getting status: {e}")
             return None
 
-    async def delete_video_data(self, video_id: str) -> bool:
+    def delete_video_data(self, video_id: str) -> bool:
         """
         Delete all data for a video (cascade delete).
         
@@ -608,17 +726,17 @@ class VideoService:
             True if deletion succeeded, False otherwise
         """
         try:
-            session = await self._get_session()
+            session = self._get_session()
             
             # Get video record
-            video = await self.get_video_by_video_id(video_id)
+            video = self.get_video_by_video_id(video_id)
             if not video:
                 self._logger.warning(f"Video {video_id} not found for deletion")
                 return False
             
             # Delete video (cascade will handle related records)
-            await session.delete(video)
-            await session.commit()
+            session.delete(video)
+            session.commit()
             
             self._logger.info(f"Deleted video data for {video_id}")
             return True
@@ -632,7 +750,7 @@ class VideoService:
 
 
 # Convenience function for creating video service with session
-async def create_video_service_with_session() -> VideoService:
+def create_video_service_with_session() -> VideoService:
     """
     Create a VideoService instance with a new database session.
     
@@ -645,7 +763,7 @@ async def create_video_service_with_session() -> VideoService:
 
 
 # Dependency injection function for FastAPI
-def get_video_service(session: AsyncSession) -> VideoService:
+def get_video_service(session: Session) -> VideoService:
     """
     Get VideoService instance for dependency injection.
     
