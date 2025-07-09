@@ -21,6 +21,7 @@ from ..services.reprocessing_service import (
 )
 from ..database.models import Video, Transcript, Summary, Keyword, TimestampedSegment, ProcessingMetadata
 from ..database.cascade_delete import CascadeDeleteResult, CascadeDeleteValidation
+from ..database.transaction_manager import TransactionResult
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,29 @@ class ReprocessingHistoryResponse(BaseModel):
 class CancelReprocessingRequest(BaseModel):
     """Request model for cancelling reprocessing."""
     reason: str = Field("User requested", description="Reason for cancellation")
+
+
+class TransactionResultResponse(BaseModel):
+    """Response model for transaction results."""
+    success: bool
+    transaction_id: str
+    status: str
+    operations: List[Dict[str, Any]]
+    savepoints: List[Dict[str, Any]]
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    execution_time_seconds: Optional[float] = None
+    error_message: Optional[str] = None
+    rollback_reason: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class TransactionalDeleteRequest(BaseModel):
+    """Request model for transactional deletion."""
+    create_savepoints: bool = Field(True, description="Create savepoints before critical operations")
+    audit_user: Optional[str] = Field(None, description="User performing the deletion")
 
 
 # Query parameter models
@@ -1146,6 +1170,201 @@ async def clear_video_cache(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error clearing cache: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# Enhanced transaction-based deletion endpoints
+@router.delete("/videos/{video_id}/transactional", response_model=TransactionResultResponse)
+async def transactional_delete_video(
+    video_id: int,
+    delete_request: TransactionalDeleteRequest,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Delete a video using enhanced transaction management with rollback capabilities.
+    
+    This endpoint provides detailed transaction tracking, savepoint management,
+    and comprehensive rollback capabilities for video deletion operations.
+    """
+    try:
+        result = history_service.transactional_delete_video_by_id(
+            video_id=video_id,
+            create_savepoints=delete_request.create_savepoints
+        )
+        
+        # Log the transactional deletion
+        logger.info(f"Transactional deletion of video {video_id} completed by {delete_request.audit_user or 'unknown'}")
+        
+        return TransactionResultResponse(
+            success=result.success,
+            transaction_id=result.transaction_id,
+            status=result.status.value,
+            operations=[{
+                "id": op.id,
+                "type": op.operation_type.value,
+                "description": op.description,
+                "target_table": op.target_table,
+                "target_id": op.target_id,
+                "success": op.success,
+                "affected_rows": op.affected_rows,
+                "executed_at": op.executed_at,
+                "error_message": op.error_message
+            } for op in result.operations],
+            savepoints=[{
+                "name": sp.name,
+                "created_at": sp.created_at,
+                "operations_count": sp.operations_count,
+                "description": sp.description
+            } for sp in result.savepoints],
+            start_time=result.start_time,
+            end_time=result.end_time,
+            execution_time_seconds=result.execution_time_seconds,
+            error_message=result.error_message,
+            rollback_reason=result.rollback_reason
+        )
+        
+    except HistoryServiceError as e:
+        logger.error(f"History service error in transactional deletion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in transactional deletion: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/videos/batch-delete-transactional", response_model=TransactionResultResponse)
+async def transactional_batch_delete_videos(
+    delete_request: Dict[str, Any],
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Delete multiple videos using enhanced transaction management with rollback capabilities.
+    
+    This endpoint provides batch deletion with individual video savepoints,
+    allowing partial rollback if individual deletions fail.
+    """
+    try:
+        # Validate request
+        if "video_ids" not in delete_request:
+            raise HTTPException(
+                status_code=400,
+                detail="video_ids field is required"
+            )
+        
+        video_ids = delete_request["video_ids"]
+        create_savepoints = delete_request.get("create_savepoints", True)
+        audit_user = delete_request.get("audit_user")
+        
+        if not video_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="No video IDs provided for batch deletion"
+            )
+        
+        if len(video_ids) > 50:  # Lower limit for transactional batch to avoid timeout
+            raise HTTPException(
+                status_code=400,
+                detail="Transactional batch deletion limited to 50 videos at a time"
+            )
+        
+        result = history_service.transactional_batch_delete_videos(
+            video_ids=video_ids,
+            create_savepoints=create_savepoints
+        )
+        
+        # Log the transactional batch deletion
+        logger.info(f"Transactional batch deletion of {len(video_ids)} videos completed by {audit_user or 'unknown'}")
+        
+        return TransactionResultResponse(
+            success=result.success,
+            transaction_id=result.transaction_id,
+            status=result.status.value,
+            operations=[{
+                "id": op.id,
+                "type": op.operation_type.value,
+                "description": op.description,
+                "target_table": op.target_table,
+                "target_id": op.target_id,
+                "target_ids": op.target_ids,
+                "success": op.success,
+                "affected_rows": op.affected_rows,
+                "executed_at": op.executed_at,
+                "error_message": op.error_message,
+                "parameters": op.parameters
+            } for op in result.operations],
+            savepoints=[{
+                "name": sp.name,
+                "created_at": sp.created_at,
+                "operations_count": sp.operations_count,
+                "description": sp.description
+            } for sp in result.savepoints],
+            start_time=result.start_time,
+            end_time=result.end_time,
+            execution_time_seconds=result.execution_time_seconds,
+            error_message=result.error_message,
+            rollback_reason=result.rollback_reason
+        )
+        
+    except HTTPException:
+        raise
+    except HistoryServiceError as e:
+        logger.error(f"History service error in transactional batch deletion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in transactional batch deletion: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/videos/{video_id}/test-rollback", response_model=TransactionResultResponse)
+async def test_transaction_rollback(
+    video_id: int,
+    history_service: HistoryService = Depends(get_history_service)
+):
+    """
+    Test transaction rollback functionality (for testing purposes).
+    
+    This endpoint demonstrates the rollback capabilities by making a change
+    and then rolling it back to verify the rollback mechanism works correctly.
+    """
+    try:
+        result = history_service.test_transaction_rollback(video_id)
+        
+        logger.info(f"Transaction rollback test completed for video {video_id}")
+        
+        return TransactionResultResponse(
+            success=result.success,
+            transaction_id=result.transaction_id,
+            status=result.status.value,
+            operations=[{
+                "id": op.id,
+                "type": op.operation_type.value,
+                "description": op.description,
+                "target_table": op.target_table,
+                "target_id": op.target_id,
+                "success": op.success,
+                "executed_at": op.executed_at,
+                "error_message": op.error_message,
+                "parameters": op.parameters
+            } for op in result.operations],
+            savepoints=[{
+                "name": sp.name,
+                "created_at": sp.created_at,
+                "operations_count": sp.operations_count,
+                "description": sp.description
+            } for sp in result.savepoints],
+            start_time=result.start_time,
+            end_time=result.end_time,
+            execution_time_seconds=result.execution_time_seconds,
+            error_message=result.error_message,
+            rollback_reason=result.rollback_reason
+        )
+        
+    except HTTPException:
+        raise
+    except HistoryServiceError as e:
+        logger.error(f"History service error in rollback test: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in rollback test: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

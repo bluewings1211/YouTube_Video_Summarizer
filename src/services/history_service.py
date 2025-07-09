@@ -28,6 +28,9 @@ from ..database.cascade_delete import (
     CascadeDeleteManager, CascadeDeleteResult, CascadeDeleteValidation,
     create_cascade_delete_manager, validate_video_deletion, execute_enhanced_cascade_delete
 )
+from ..database.transaction_manager import (
+    TransactionManager, managed_transaction, OperationType, TransactionResult
+)
 
 logger = logging.getLogger(__name__)
 
@@ -969,6 +972,362 @@ class HistoryService:
         except Exception as e:
             self._logger.error(f"Error getting cascade delete statistics: {e}")
             raise HistoryServiceError(f"Failed to get statistics: {e}")
+
+    def transactional_delete_video_by_id(self, video_id: int, create_savepoints: bool = True) -> TransactionResult:
+        """
+        Delete a video using enhanced transaction management with rollback capabilities.
+        
+        Args:
+            video_id: Database video ID to delete
+            create_savepoints: Whether to create savepoints before critical operations
+            
+        Returns:
+            TransactionResult with detailed transaction information
+            
+        Raises:
+            HistoryServiceError: If deletion fails
+        """
+        try:
+            session = self._get_session()
+            
+            with managed_transaction(session, description=f"Delete video {video_id} with rollback support") as txn:
+                # Create initial savepoint
+                if create_savepoints:
+                    initial_savepoint = txn.create_savepoint("before_video_deletion")
+                
+                # Verify video exists and get metadata
+                video = session.get(Video, video_id)
+                if not video:
+                    raise HistoryServiceError(f"Video with ID {video_id} not found")
+                
+                # Store video info for rollback data
+                video_info = {
+                    'id': video.id,
+                    'video_id': video.video_id,
+                    'title': video.title,
+                    'url': video.url,
+                    'created_at': video.created_at,
+                    'updated_at': video.updated_at
+                }
+                
+                # Get related data counts before deletion
+                related_counts = {}
+                
+                # Count transcripts
+                transcript_count = session.execute(
+                    select(func.count(Transcript.id)).where(Transcript.video_id == video_id)
+                ).scalar()
+                related_counts['transcripts'] = transcript_count
+                
+                # Count summaries
+                summary_count = session.execute(
+                    select(func.count(Summary.id)).where(Summary.video_id == video_id)
+                ).scalar()
+                related_counts['summaries'] = summary_count
+                
+                # Count keywords
+                keyword_count = session.execute(
+                    select(func.count(Keyword.id)).where(Keyword.video_id == video_id)
+                ).scalar()
+                related_counts['keywords'] = keyword_count
+                
+                # Count timestamped segments
+                segment_count = session.execute(
+                    select(func.count(TimestampedSegment.id)).where(TimestampedSegment.video_id == video_id)
+                ).scalar()
+                related_counts['timestamped_segments'] = segment_count
+                
+                # Count processing metadata
+                metadata_count = session.execute(
+                    select(func.count(ProcessingMetadata.id)).where(ProcessingMetadata.video_id == video_id)
+                ).scalar()
+                related_counts['processing_metadata'] = metadata_count
+                
+                # Create savepoint before each deletion operation
+                if create_savepoints:
+                    deletion_savepoint = txn.create_savepoint("before_cascade_deletion")
+                
+                # Execute deletion operations in order
+                total_deleted = 0
+                
+                # Delete processing metadata first
+                if metadata_count > 0:
+                    delete_op = txn.execute_operation(
+                        OperationType.DELETE,
+                        f"Delete {metadata_count} processing metadata records",
+                        "processing_metadata",
+                        lambda: session.execute(delete(ProcessingMetadata).where(ProcessingMetadata.video_id == video_id)),
+                        target_id=video_id,
+                        rollback_data={"count": metadata_count}
+                    )
+                    total_deleted += delete_op.affected_rows or 0
+                
+                # Delete timestamped segments
+                if segment_count > 0:
+                    delete_op = txn.execute_operation(
+                        OperationType.DELETE,
+                        f"Delete {segment_count} timestamped segments",
+                        "timestamped_segments",
+                        lambda: session.execute(delete(TimestampedSegment).where(TimestampedSegment.video_id == video_id)),
+                        target_id=video_id,
+                        rollback_data={"count": segment_count}
+                    )
+                    total_deleted += delete_op.affected_rows or 0
+                
+                # Delete keywords
+                if keyword_count > 0:
+                    delete_op = txn.execute_operation(
+                        OperationType.DELETE,
+                        f"Delete {keyword_count} keyword records",
+                        "keywords",
+                        lambda: session.execute(delete(Keyword).where(Keyword.video_id == video_id)),
+                        target_id=video_id,
+                        rollback_data={"count": keyword_count}
+                    )
+                    total_deleted += delete_op.affected_rows or 0
+                
+                # Delete summaries
+                if summary_count > 0:
+                    delete_op = txn.execute_operation(
+                        OperationType.DELETE,
+                        f"Delete {summary_count} summary records",
+                        "summaries",
+                        lambda: session.execute(delete(Summary).where(Summary.video_id == video_id)),
+                        target_id=video_id,
+                        rollback_data={"count": summary_count}
+                    )
+                    total_deleted += delete_op.affected_rows or 0
+                
+                # Delete transcripts
+                if transcript_count > 0:
+                    delete_op = txn.execute_operation(
+                        OperationType.DELETE,
+                        f"Delete {transcript_count} transcript records",
+                        "transcripts",
+                        lambda: session.execute(delete(Transcript).where(Transcript.video_id == video_id)),
+                        target_id=video_id,
+                        rollback_data={"count": transcript_count}
+                    )
+                    total_deleted += delete_op.affected_rows or 0
+                
+                # Finally, delete the video itself
+                video_delete_op = txn.execute_operation(
+                    OperationType.DELETE,
+                    f"Delete video record: {video.title}",
+                    "videos",
+                    lambda: session.delete(video),
+                    target_id=video_id,
+                    rollback_data=video_info
+                )
+                total_deleted += 1
+                
+                # Commit transaction
+                result = txn.commit_transaction()
+                
+                self._logger.info(f"Transactional deletion completed for video {video_id}: "
+                                f"deleted {total_deleted} total records")
+                
+                return result
+                
+        except Exception as e:
+            self._logger.error(f"Error in transactional deletion for video {video_id}: {e}")
+            raise HistoryServiceError(f"Transactional deletion failed: {e}")
+
+    def transactional_batch_delete_videos(self, video_ids: List[int], create_savepoints: bool = True) -> TransactionResult:
+        """
+        Delete multiple videos using enhanced transaction management with rollback capabilities.
+        
+        Args:
+            video_ids: List of database video IDs to delete
+            create_savepoints: Whether to create savepoints before critical operations
+            
+        Returns:
+            TransactionResult with detailed transaction information
+            
+        Raises:
+            HistoryServiceError: If batch deletion fails
+        """
+        try:
+            session = self._get_session()
+            
+            with managed_transaction(session, description=f"Batch delete {len(video_ids)} videos with rollback support") as txn:
+                # Create initial savepoint
+                if create_savepoints:
+                    initial_savepoint = txn.create_savepoint("before_batch_deletion")
+                
+                total_deleted = 0
+                successful_deletions = 0
+                failed_deletions = 0
+                
+                for i, video_id in enumerate(video_ids):
+                    try:
+                        # Create savepoint for each video if requested
+                        if create_savepoints:
+                            video_savepoint = txn.create_savepoint(f"before_video_{video_id}")
+                        
+                        # Verify video exists
+                        video = session.get(Video, video_id)
+                        if not video:
+                            self._logger.warning(f"Video {video_id} not found, skipping")
+                            failed_deletions += 1
+                            continue
+                        
+                        # Get related data counts
+                        related_counts = {}
+                        for table_name, model_class in [
+                            ('transcripts', Transcript),
+                            ('summaries', Summary),
+                            ('keywords', Keyword),
+                            ('timestamped_segments', TimestampedSegment),
+                            ('processing_metadata', ProcessingMetadata)
+                        ]:
+                            count = session.execute(
+                                select(func.count(model_class.id)).where(model_class.video_id == video_id)
+                            ).scalar()
+                            related_counts[table_name] = count
+                        
+                        # Execute deletion for this video
+                        video_total = sum(related_counts.values()) + 1  # +1 for video itself
+                        
+                        delete_op = txn.execute_operation(
+                            OperationType.BATCH_DELETE,
+                            f"Delete video {video_id} and {video_total-1} related records",
+                            "videos",
+                            lambda v=video: session.delete(v),  # Capture video in closure
+                            target_id=video_id,
+                            rollback_data={
+                                "video_info": {
+                                    "id": video.id,
+                                    "video_id": video.video_id,
+                                    "title": video.title
+                                },
+                                "related_counts": related_counts
+                            }
+                        )
+                        
+                        total_deleted += video_total
+                        successful_deletions += 1
+                        
+                        # Flush changes to ensure they're processed
+                        session.flush()
+                        
+                    except Exception as e:
+                        self._logger.error(f"Failed to delete video {video_id} in batch: {e}")
+                        failed_deletions += 1
+                        
+                        # Rollback to video savepoint if it exists
+                        if create_savepoints and 'video_savepoint' in locals():
+                            try:
+                                txn.rollback_to_savepoint(video_savepoint, f"Video {video_id} deletion failed")
+                            except Exception as rollback_error:
+                                self._logger.error(f"Failed to rollback video {video_id}: {rollback_error}")
+                        
+                        # Continue with next video
+                        continue
+                
+                # Add summary operation
+                summary_op = txn.execute_operation(
+                    OperationType.BATCH_DELETE,
+                    f"Batch deletion summary: {successful_deletions} successful, {failed_deletions} failed",
+                    "batch_summary",
+                    lambda: None,  # No-op
+                    target_ids=video_ids,
+                    parameters={
+                        "total_videos": len(video_ids),
+                        "successful_deletions": successful_deletions,
+                        "failed_deletions": failed_deletions,
+                        "total_records_deleted": total_deleted
+                    }
+                )
+                
+                # Commit transaction
+                result = txn.commit_transaction()
+                
+                self._logger.info(f"Transactional batch deletion completed: "
+                                f"{successful_deletions} successful, {failed_deletions} failed, "
+                                f"{total_deleted} total records deleted")
+                
+                return result
+                
+        except Exception as e:
+            self._logger.error(f"Error in transactional batch deletion: {e}")
+            raise HistoryServiceError(f"Transactional batch deletion failed: {e}")
+
+    def test_transaction_rollback(self, video_id: int) -> TransactionResult:
+        """
+        Test transaction rollback functionality with a video (for testing purposes).
+        
+        Args:
+            video_id: Database video ID to test with
+            
+        Returns:
+            TransactionResult showing rollback behavior
+            
+        Raises:
+            HistoryServiceError: If test fails
+        """
+        try:
+            session = self._get_session()
+            
+            with managed_transaction(session, description=f"Test rollback with video {video_id}") as txn:
+                # Create savepoint
+                test_savepoint = txn.create_savepoint("test_rollback_point")
+                
+                # Get video
+                video = session.get(Video, video_id)
+                if not video:
+                    raise HistoryServiceError(f"Video with ID {video_id} not found")
+                
+                # Simulate some operations that would modify data
+                original_title = video.title
+                test_title = f"TEST_ROLLBACK_{original_title}"
+                
+                # Update video title (this will be rolled back)
+                update_op = txn.execute_operation(
+                    OperationType.UPDATE,
+                    f"Update video title to test rollback",
+                    "videos",
+                    lambda: setattr(video, 'title', test_title),
+                    target_id=video_id,
+                    rollback_data={"original_title": original_title}
+                )
+                
+                # Flush to see the change
+                session.flush()
+                
+                # Verify the change was made
+                updated_video = session.get(Video, video_id)
+                if updated_video.title != test_title:
+                    raise HistoryServiceError("Title update failed")
+                
+                # Now rollback to savepoint
+                txn.rollback_to_savepoint(test_savepoint, "Testing rollback functionality")
+                
+                # Verify rollback worked
+                session.flush()
+                rolled_back_video = session.get(Video, video_id)
+                if rolled_back_video.title != original_title:
+                    raise HistoryServiceError("Rollback failed - title was not restored")
+                
+                # Add success operation
+                success_op = txn.execute_operation(
+                    OperationType.UPDATE,
+                    "Rollback test completed successfully",
+                    "test",
+                    lambda: None,  # No-op
+                    target_id=video_id,
+                    parameters={"test_result": "success"}
+                )
+                
+                # Commit transaction (no actual changes should be committed due to rollback)
+                result = txn.commit_transaction()
+                
+                self._logger.info(f"Rollback test completed successfully for video {video_id}")
+                return result
+                
+        except Exception as e:
+            self._logger.error(f"Error in rollback test for video {video_id}: {e}")
+            raise HistoryServiceError(f"Rollback test failed: {e}")
 
 
 # Dependency injection function for FastAPI
