@@ -14,6 +14,11 @@ from sqlalchemy.orm import Session
 
 from ..database.connection import get_database_session_dependency
 from ..services.history_service import HistoryService, get_history_service, HistoryServiceError
+from ..services.reprocessing_service import (
+    ReprocessingService, get_reprocessing_service, ReprocessingServiceError,
+    ReprocessingRequest, ReprocessingResult, ReprocessingValidation, 
+    ReprocessingMode, ReprocessingStatus
+)
 from ..database.models import Video, Transcript, Summary, Keyword, TimestampedSegment, ProcessingMetadata
 from ..database.cascade_delete import CascadeDeleteResult, CascadeDeleteValidation
 
@@ -221,6 +226,94 @@ class CascadeDeleteStatisticsResponse(BaseModel):
     total_videos: int
     average_related_records: Dict[str, Dict[str, Any]]
     videos_with_most_related: List[Dict[str, Any]]
+
+
+# Reprocessing models
+class ReprocessingModeEnum(str, Enum):
+    """Reprocessing mode enumeration."""
+    FULL = "full"
+    TRANSCRIPT_ONLY = "transcript_only"
+    SUMMARY_ONLY = "summary_only"
+    KEYWORDS_ONLY = "keywords_only"
+    SEGMENTS_ONLY = "segments_only"
+    INCREMENTAL = "incremental"
+
+
+class ReprocessingStatusEnum(str, Enum):
+    """Reprocessing status enumeration."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ReprocessingRequestModel(BaseModel):
+    """Request model for video reprocessing."""
+    mode: ReprocessingModeEnum = Field(ReprocessingModeEnum.FULL, description="Reprocessing mode")
+    force: bool = Field(False, description="Force reprocessing even if validation fails")
+    clear_cache: bool = Field(True, description="Clear cached data before reprocessing")
+    preserve_metadata: bool = Field(True, description="Preserve existing processing metadata")
+    requested_by: Optional[str] = Field(None, description="User requesting reprocessing")
+    workflow_params: Optional[Dict[str, Any]] = Field(None, description="Additional workflow parameters")
+
+
+class ReprocessingValidationResponse(BaseModel):
+    """Response model for reprocessing validation."""
+    can_reprocess: bool
+    video_exists: bool
+    current_status: Optional[str] = None
+    existing_components: Dict[str, int]
+    potential_issues: List[str]
+    recommendations: List[str]
+
+    class Config:
+        from_attributes = True
+
+
+class ReprocessingResultResponse(BaseModel):
+    """Response model for reprocessing result."""
+    success: bool
+    video_id: int
+    mode: ReprocessingModeEnum
+    status: ReprocessingStatusEnum
+    message: str
+    cleared_components: List[str]
+    processing_metadata_id: Optional[int] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    execution_time_seconds: Optional[float] = None
+    error_details: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ReprocessingStatusResponse(BaseModel):
+    """Response model for reprocessing status."""
+    video_id: int
+    video_title: str
+    video_youtube_id: str
+    processing_metadata_id: int
+    status: str
+    workflow_params: Optional[Dict[str, Any]] = None
+    error_info: Optional[str] = None
+    created_at: datetime
+    is_reprocessing: bool
+
+    class Config:
+        from_attributes = True
+
+
+class ReprocessingHistoryResponse(BaseModel):
+    """Response model for reprocessing history."""
+    history: List[Dict[str, Any]]
+    total_count: int
+
+
+class CancelReprocessingRequest(BaseModel):
+    """Request model for cancelling reprocessing."""
+    reason: str = Field("User requested", description="Reason for cancellation")
 
 
 # Query parameter models
@@ -808,6 +901,251 @@ async def get_cascade_delete_statistics(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error getting statistics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# Video reprocessing endpoints
+@router.get("/videos/{video_id}/validate-reprocessing", response_model=ReprocessingValidationResponse)
+async def validate_video_reprocessing(
+    video_id: int,
+    mode: ReprocessingModeEnum = Query(ReprocessingModeEnum.FULL, description="Reprocessing mode"),
+    force: bool = Query(False, description="Force reprocessing even if validation fails"),
+    reprocessing_service: ReprocessingService = Depends(get_reprocessing_service)
+):
+    """
+    Validate that a video can be reprocessed.
+    
+    Checks for potential issues like active processing tasks,
+    existing components, and provides recommendations.
+    """
+    try:
+        request = ReprocessingRequest(
+            video_id=video_id,
+            mode=ReprocessingMode(mode.value),
+            force=force
+        )
+        
+        validation = reprocessing_service.validate_reprocessing_request(request)
+        
+        return ReprocessingValidationResponse(
+            can_reprocess=validation.can_reprocess,
+            video_exists=validation.video_exists,
+            current_status=validation.current_status,
+            existing_components=validation.existing_components,
+            potential_issues=validation.potential_issues,
+            recommendations=validation.recommendations
+        )
+        
+    except ReprocessingServiceError as e:
+        logger.error(f"Reprocessing service error validating: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error validating reprocessing: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/videos/{video_id}/reprocess", response_model=ReprocessingResultResponse)
+async def reprocess_video(
+    video_id: int,
+    reprocessing_request: ReprocessingRequestModel,
+    reprocessing_service: ReprocessingService = Depends(get_reprocessing_service)
+):
+    """
+    Initiate reprocessing for a video.
+    
+    Triggers the reprocessing workflow with the specified mode,
+    optionally clearing cached data and preserving metadata.
+    """
+    try:
+        request = ReprocessingRequest(
+            video_id=video_id,
+            mode=ReprocessingMode(reprocessing_request.mode.value),
+            force=reprocessing_request.force,
+            clear_cache=reprocessing_request.clear_cache,
+            preserve_metadata=reprocessing_request.preserve_metadata,
+            requested_by=reprocessing_request.requested_by,
+            workflow_params=reprocessing_request.workflow_params
+        )
+        
+        result = reprocessing_service.initiate_reprocessing(request)
+        
+        if not result.success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to initiate reprocessing: {result.message}"
+            )
+        
+        # Log the reprocessing initiation
+        logger.info(f"Video {video_id} reprocessing initiated with mode {reprocessing_request.mode.value} by {reprocessing_request.requested_by or 'unknown'}")
+        
+        return ReprocessingResultResponse(
+            success=result.success,
+            video_id=result.video_id,
+            mode=ReprocessingModeEnum(result.mode.value),
+            status=ReprocessingStatusEnum(result.status.value),
+            message=result.message,
+            cleared_components=result.cleared_components,
+            processing_metadata_id=result.processing_metadata_id,
+            start_time=result.start_time,
+            end_time=result.end_time,
+            execution_time_seconds=result.execution_time_seconds,
+            error_details=result.error_details
+        )
+        
+    except HTTPException:
+        raise
+    except ReprocessingServiceError as e:
+        logger.error(f"Reprocessing service error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error reprocessing video: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/videos/{video_id}/reprocessing-status", response_model=ReprocessingStatusResponse)
+async def get_video_reprocessing_status(
+    video_id: int,
+    reprocessing_service: ReprocessingService = Depends(get_reprocessing_service)
+):
+    """
+    Get the current reprocessing status for a video.
+    
+    Returns the current processing status, including whether
+    it's actively being reprocessed and any error information.
+    """
+    try:
+        status = reprocessing_service.get_reprocessing_status(video_id)
+        
+        if not status:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No processing status found for video {video_id}"
+            )
+        
+        return ReprocessingStatusResponse(
+            video_id=status['video_id'],
+            video_title=status['video_title'],
+            video_youtube_id=status['video_youtube_id'],
+            processing_metadata_id=status['processing_metadata_id'],
+            status=status['status'],
+            workflow_params=status['workflow_params'],
+            error_info=status['error_info'],
+            created_at=status['created_at'],
+            is_reprocessing=status['is_reprocessing']
+        )
+        
+    except HTTPException:
+        raise
+    except ReprocessingServiceError as e:
+        logger.error(f"Reprocessing service error getting status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error getting reprocessing status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/videos/{video_id}/cancel-reprocessing")
+async def cancel_video_reprocessing(
+    video_id: int,
+    cancel_request: CancelReprocessingRequest,
+    reprocessing_service: ReprocessingService = Depends(get_reprocessing_service)
+):
+    """
+    Cancel an active reprocessing operation for a video.
+    
+    Stops the reprocessing workflow and marks the operation
+    as cancelled with the provided reason.
+    """
+    try:
+        success = reprocessing_service.cancel_reprocessing(video_id, cancel_request.reason)
+        
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active reprocessing found for video {video_id}"
+            )
+        
+        logger.info(f"Video {video_id} reprocessing cancelled: {cancel_request.reason}")
+        
+        return {
+            "success": True,
+            "video_id": video_id,
+            "message": f"Reprocessing cancelled: {cancel_request.reason}"
+        }
+        
+    except HTTPException:
+        raise
+    except ReprocessingServiceError as e:
+        logger.error(f"Reprocessing service error cancelling: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error cancelling reprocessing: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/videos/{video_id}/reprocessing-history", response_model=ReprocessingHistoryResponse)
+async def get_video_reprocessing_history(
+    video_id: int,
+    limit: int = Query(10, ge=1, le=100, description="Maximum number of records to return"),
+    reprocessing_service: ReprocessingService = Depends(get_reprocessing_service)
+):
+    """
+    Get reprocessing history for a video.
+    
+    Returns a list of all reprocessing operations performed
+    on the video, including their status and details.
+    """
+    try:
+        history = reprocessing_service.get_reprocessing_history(video_id, limit)
+        
+        return ReprocessingHistoryResponse(
+            history=history,
+            total_count=len(history)
+        )
+        
+    except ReprocessingServiceError as e:
+        logger.error(f"Reprocessing service error getting history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error getting reprocessing history: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/videos/{video_id}/clear-cache")
+async def clear_video_cache(
+    video_id: int,
+    mode: ReprocessingModeEnum = Query(ReprocessingModeEnum.FULL, description="Cache clearing mode"),
+    preserve_metadata: bool = Query(True, description="Preserve processing metadata"),
+    reprocessing_service: ReprocessingService = Depends(get_reprocessing_service)
+):
+    """
+    Clear cached data for a video.
+    
+    Removes cached processing results based on the specified mode
+    without triggering reprocessing.
+    """
+    try:
+        cleared_components = reprocessing_service.clear_video_cache(
+            video_id=video_id,
+            mode=ReprocessingMode(mode.value),
+            preserve_metadata=preserve_metadata
+        )
+        
+        logger.info(f"Cache cleared for video {video_id} with mode {mode.value}")
+        
+        return {
+            "success": True,
+            "video_id": video_id,
+            "mode": mode.value,
+            "cleared_components": cleared_components,
+            "message": f"Cache cleared successfully. Components cleared: {', '.join(cleared_components) if cleared_components else 'none'}"
+        }
+        
+    except ReprocessingServiceError as e:
+        logger.error(f"Reprocessing service error clearing cache: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error clearing cache: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
