@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .call_llm import (
-    LLMClient, LLMConfig, LLMProvider, LLMError,
+    LLMClient, LLMConfig, LLMProvider, LLMError, LLMClientError,
     create_llm_client, check_ollama_availability, get_recommended_ollama_model,
     detect_provider_from_model, OllamaConnectionError, OllamaModelNotFoundError
 )
@@ -364,9 +364,9 @@ class SmartLLMClient:
                     temperature=model_config.get('temperature', 0.7)
                 )
                 
-        except (OllamaConnectionError, OllamaModelNotFoundError) as e:
+        except (OllamaConnectionError, OllamaModelNotFoundError, LLMClientError) as e:
             # Handle Ollama-specific errors with fallback
-            if self.config.get('ollama', {}).get('fallback_enabled', True):
+            if provider == 'ollama' and self.config.get('ollama', {}).get('fallback_enabled', True):
                 fallback_provider = self.config.get('ollama', {}).get('fallback_provider', 'openai')
                 self.logger.warning(f"Ollama failed, falling back to {fallback_provider}: {str(e)}")
                 return self._create_fallback_client(task_requirements, fallback_provider)

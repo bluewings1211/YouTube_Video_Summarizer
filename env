@@ -19,16 +19,16 @@ MODEL_SELECTION_STRATEGY=prefer_local
 
 # Ollama Configuration - Development settings
 OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=my-qwen3:8b_ctx20K_pre1k
+OLLAMA_MODEL=gemma3n:e4b
 OLLAMA_AUTO_PULL=true
 OLLAMA_MODEL_CACHE_SIZE=3
 OLLAMA_GPU_MEMORY_FRACTION=0.5
 OLLAMA_CONTEXT_SIZE=2048
 
 # Model Selection - Optimized for development
-LIGHTWEIGHT_MODEL=my-qwen3:8b_ctx20K_pre1k
-PERFORMANCE_MODEL=my-qwen3:8b_ctx20K_pre1k
-CHINESE_LANGUAGE_MODEL=my-qwen3:8b_ctx20K_pre1k
+LIGHTWEIGHT_MODEL=gemma3n:e4b
+PERFORMANCE_MODEL=gemma3n:e4b
+CHINESE_LANGUAGE_MODEL=gemma3n:e4b
 
 # Proxy Configuration - Disabled for development
 PROXY_ENABLED=false

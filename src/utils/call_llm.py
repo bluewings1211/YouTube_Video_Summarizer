@@ -246,10 +246,15 @@ class LLMClient:
 
             self.logger.info(f"Ollama client initialized with model: {self.config.model} at {self.config.ollama_host}")
 
+        except FileNotFoundError as e:
+            # Handle FileNotFoundError specifically - usually means Ollama binary not found
+            self.logger.error(f"Ollama binary not found: {e}")
+            raise OllamaConnectionError(self.config.ollama_host)
         except Exception as e:
-            if "connection" in str(e).lower() or "refused" in str(e).lower():
+            error_str = str(e).lower()
+            if "connection" in error_str or "refused" in error_str:
                 raise OllamaConnectionError(self.config.ollama_host)
-            elif "not found" in str(e).lower():
+            elif "not found" in error_str:
                 raise OllamaModelNotFoundError(self.config.model)
             else:
                 self.logger.error(f"Full error when initializing Ollama client: {e}", exc_info=True)
@@ -841,6 +846,15 @@ def check_ollama_availability(host: str = "http://localhost:11434") -> Dict[str,
             'status': 'connected'
         }
         
+    except FileNotFoundError as e:
+        # Handle FileNotFoundError specifically - usually means Ollama binary not found
+        return {
+            'available': False,
+            'reason': f"Ollama binary not found: {str(e)}",
+            'models': [],
+            'host': host,
+            'error': str(e)
+        }
     except Exception as e:
         error_str = str(e).lower()
         if "connection" in error_str or "refused" in error_str:
