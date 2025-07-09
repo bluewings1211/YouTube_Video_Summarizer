@@ -119,8 +119,14 @@ class VideoService:
         video_id: str,
         title: str,
         duration: Optional[int] = None,
-        url: Optional[str] = None
-    ) -> Video:
+        url: Optional[str] = None,
+        channel_name: Optional[str] = None,
+        description: Optional[str] = None,
+        published_date: Optional[str] = None,
+        view_count: Optional[int] = None,
+        transcript_content: Optional[str] = None,
+        transcript_language: Optional[str] = None
+    ) -> Optional[Video]:
         """
         Create a new video record in the database.
         
@@ -129,67 +135,72 @@ class VideoService:
             title: Video title
             duration: Video duration in seconds
             url: Video URL
+            channel_name: Channel name
+            description: Video description
+            published_date: Published date
+            view_count: View count
+            transcript_content: Transcript content
+            transcript_language: Transcript language
             
         Returns:
-            Created Video object
+            Created Video object or None if failed
             
         Raises:
             VideoServiceError: If creation fails
         """
         with MonitoredOperation("create_video_record"):
             try:
-                session = self._get_session()
-                
-                # Check if video already exists
-                existing_video = self.get_video_by_video_id(video_id)
-                if existing_video:
-                    self._logger.info(f"Video {video_id} already exists, returning existing record")
-                    return existing_video
-                
-                # Create new video record
-                video = Video(
-                    video_id=video_id,
-                    title=title,
-                    duration=duration,
-                    url=url or f"https://www.youtube.com/watch?v={video_id}"
-                )
-                
-                session.add(video)
-                session.commit()
-                session.refresh(video)
-                
-                self._logger.info(f"Created video record for {video_id}")
-                return video
+                # Use context manager for session
+                with get_database_session() as session:
+                    # Check if video already exists
+                    existing_video_query = select(Video).where(Video.video_id == video_id)
+                    result = session.execute(existing_video_query)
+                    existing_video = result.scalar_one_or_none()
+                    
+                    if existing_video:
+                        self._logger.info(f"Video {video_id} already exists, returning existing record")
+                        return existing_video
+                    
+                    # Create new video record
+                    video = Video(
+                        video_id=video_id,
+                        title=title,
+                        duration=duration,
+                        url=url or f"https://www.youtube.com/watch?v={video_id}"
+                    )
+                    
+                    session.add(video)
+                    session.commit()
+                    session.refresh(video)
+                    
+                    # Create transcript record if content provided
+                    if transcript_content:
+                        from ..database.models import Transcript
+                        transcript = Transcript(
+                            video_id=video.id,
+                            content=transcript_content,
+                            language=transcript_language or 'unknown'
+                        )
+                        session.add(transcript)
+                        session.commit()
+                    
+                    self._logger.info(f"Created video record for {video_id}")
+                    return video
                 
             except IntegrityError as e:
                 # Handle constraint violations (e.g., duplicate video_id)
-                db_error = DatabaseConstraintError(
-                    f"Video {video_id} already exists or constraint violation",
-                    constraint_name="unique_video_id",
-                    original_error=e,
-                    context={'video_id': video_id}
-                )
-                self._logger.error(f"Constraint error creating video record: {db_error}")
-                raise VideoServiceError(f"Failed to create video record: {db_error.message}")
-            
-            except TimeoutError as e:
-                # Handle database timeouts
-                db_error = DatabaseTimeoutError(
-                    f"Database timeout creating video record for {video_id}",
-                    original_error=e,
-                    context={'video_id': video_id, 'operation': 'create_video'}
-                )
-                self._logger.error(f"Timeout error creating video record: {db_error}")
-                raise VideoServiceError(f"Failed to create video record: {db_error.message}")
-            
-            except SQLAlchemyError as e:
-                # Classify and handle other SQLAlchemy errors
-                db_error = classify_database_error(e)
-                db_error.context = db_error.context or {}
-                db_error.context.update({'video_id': video_id, 'operation': 'create_video'})
-                
-                self._logger.error(f"Database error creating video record: {db_error}")
-                raise VideoServiceError(f"Failed to create video record: {db_error.message}")
+                self._logger.warning(f"Video {video_id} already exists (constraint violation): {e}")
+                # Try to return existing video
+                try:
+                    with get_database_session() as session:
+                        existing_video_query = select(Video).where(Video.video_id == video_id)
+                        result = session.execute(existing_video_query)
+                        existing_video = result.scalar_one_or_none()
+                        if existing_video:
+                            return existing_video
+                except Exception:
+                    pass
+                return None
             
             except Exception as e:
                 self._logger.error(f"Unexpected error creating video record: {e}")

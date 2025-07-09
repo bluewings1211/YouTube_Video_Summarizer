@@ -254,9 +254,11 @@ class YouTubeDataNode(BaseProcessingNode):
             )
             post_result['processing_time_seconds'] = processing_time
             
-            # Skip database operations for now to avoid async issues
-            # TODO: Implement proper async handling for database operations
-            self.logger.info("Database operations skipped in sync context")
+            # Create video record in database only if execution was successful
+            if exec_result.get('execution_status') == 'success':
+                self._create_video_record(exec_result, processing_time)
+            else:
+                self.logger.info(f"Skipping video record creation due to execution status: {exec_result.get('execution_status')}")
             
             self.logger.info(f"YouTube data post-processing completed: {post_result['processing_status']}")
             return post_result
@@ -333,3 +335,60 @@ class YouTubeDataNode(BaseProcessingNode):
         }
         
         return stats
+    
+    def _create_video_record(self, exec_result: Dict[str, Any], processing_time: float) -> None:
+        """
+        Create video record in database using the video service.
+        
+        Args:
+            exec_result: Result from exec containing video metadata and transcript
+            processing_time: Processing time in seconds
+        """
+        self.logger.info(f"Creating video record - video_service available: {self.video_service is not None}")
+        if not self.video_service:
+            self.logger.warning("No video service available, skipping video record creation")
+            return
+        
+        try:
+            # Extract data from exec_result - correct structure
+            youtube_data = exec_result.get('youtube_data', {})
+            video_metadata = youtube_data.get('video_metadata', {})
+            transcript_data = youtube_data.get('transcript_data', {})
+            
+            if not video_metadata.get('video_id'):
+                self.logger.warning(f"No video_id found in video_metadata: {list(video_metadata.keys())}")
+                return
+            
+            # Debug: Log video_metadata keys and duration value
+            duration_value = video_metadata.get('duration', video_metadata.get('duration_seconds', 0))
+            self.logger.info(f"Video metadata keys: {list(video_metadata.keys())}")
+            self.logger.info(f"Duration value: {duration_value} (type: {type(duration_value)})")
+            
+            # Ensure duration is positive
+            if duration_value <= 0:
+                self.logger.warning(f"Duration was {duration_value}, setting to 1 second minimum")
+                duration_value = 1  # Set minimum duration to 1 second
+            
+            # Create video record using VideoService
+            video_record = self.video_service.create_video_record(
+                video_id=video_metadata['video_id'],
+                title=video_metadata.get('title', 'Unknown Title'),
+                duration=duration_value,
+                url=f"https://www.youtube.com/watch?v={video_metadata['video_id']}",
+                channel_name=video_metadata.get('channel_name'),
+                description=video_metadata.get('description'),
+                published_date=video_metadata.get('published_date'),
+                view_count=video_metadata.get('view_count'),
+                transcript_content=transcript_data.get('transcript_text', ''),
+                transcript_language=transcript_data.get('language', 'unknown')
+            )
+            
+            if video_record:
+                self.logger.info(f"Successfully created video record for {video_metadata['video_id']}")
+            else:
+                self.logger.warning(f"Failed to create video record for {video_metadata['video_id']}")
+                
+        except Exception as e:
+            self.logger.error(f"Error creating video record: {str(e)}")
+            # Don't raise the exception to avoid breaking the workflow
+            # The workflow can continue without database storage
