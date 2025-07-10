@@ -17,10 +17,20 @@ from .orchestrator import YouTubeSummarizerFlow, YouTubeBatchProcessingFlow
 from .config import WorkflowConfig, NodeConfig, DataFlowConfig, LanguageProcessingConfig
 from .error_handler import WorkflowError, CircuitBreaker, ErrorSeverity
 from .monitoring import WorkflowMetrics, NodeMetrics
+from .status_aware_orchestrator import (
+    StatusAwareYouTubeSummarizerFlow, 
+    StatusAwareYouTubeBatchProcessingFlow,
+    create_status_aware_summarizer_flow,
+    create_status_aware_batch_flow
+)
 
 __all__ = [
     'YouTubeSummarizerFlow',
     'YouTubeBatchProcessingFlow',
+    'StatusAwareYouTubeSummarizerFlow',
+    'StatusAwareYouTubeBatchProcessingFlow',
+    'create_status_aware_summarizer_flow',
+    'create_status_aware_batch_flow',
     'WorkflowConfig',
     'NodeConfig', 
     'DataFlowConfig',

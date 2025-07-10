@@ -15,6 +15,10 @@ The original implementation has been split into focused modules:
 from .refactored_flow import (
     YouTubeSummarizerFlow,
     YouTubeBatchProcessingFlow,
+    StatusAwareYouTubeSummarizerFlow,
+    StatusAwareYouTubeBatchProcessingFlow,
+    create_status_aware_summarizer_flow,
+    create_status_aware_batch_flow,
     WorkflowConfig,
     NodeConfig,
     DataFlowConfig,
@@ -30,6 +34,10 @@ from .refactored_flow import (
 __all__ = [
     'YouTubeSummarizerFlow',
     'YouTubeBatchProcessingFlow',
+    'StatusAwareYouTubeSummarizerFlow',
+    'StatusAwareYouTubeBatchProcessingFlow',
+    'create_status_aware_summarizer_flow',
+    'create_status_aware_batch_flow',
     'WorkflowConfig',
     'NodeConfig',
     'DataFlowConfig', 
