@@ -80,9 +80,9 @@
   - [x] 4.8 編寫通知系統的測試
 
 - [ ] 5.0 改進 timestamped_segments 語意分析
-  - [ ] 5.1 實作語意分析服務（SemanticAnalysisService）
-  - [ ] 5.2 建立語意分組演算法
-  - [ ] 5.3 整合 embedding 技術進行向量搜尋
+  - [x] 5.1 實作語意分析服務（SemanticAnalysisService）
+  - [x] 5.2 建立語意分組演算法
+  - [x] 5.3 整合 embedding 技術進行向量搜尋
   - [ ] 5.4 實作時間戳記的精確對應
   - [ ] 5.5 創建語意分析的 PocketFlow 節點
   - [ ] 5.6 整合語意分析到現有處理流程
