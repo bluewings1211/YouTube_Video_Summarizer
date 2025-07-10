@@ -213,6 +213,30 @@ except ImportError:
     except ImportError:
         logger.warning("Could not import batch router - batch processing endpoints will not be available")
 
+# Include status tracking routers
+try:
+    from .api.status import router as status_router
+    app.include_router(status_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.status import router as status_router
+        app.include_router(status_router)
+    except ImportError:
+        logger.warning("Could not import status router - status tracking endpoints will not be available")
+
+# Include enhanced status tracking router
+try:
+    from .api.status_enhanced import router as status_enhanced_router
+    app.include_router(status_enhanced_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.status_enhanced import router as status_enhanced_router
+        app.include_router(status_enhanced_router)
+    except ImportError:
+        logger.warning("Could not import enhanced status router - enhanced status tracking endpoints will not be available")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
