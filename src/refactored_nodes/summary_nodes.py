@@ -425,7 +425,31 @@ class TimestampNode(BaseProcessingNode):
         task_requirements: TaskRequirements,
         is_chinese: bool = False
     ) -> Dict[str, Any]:
-        """Generate timestamps using the smart LLM client."""
+        """Generate timestamps using the smart LLM client with semantic analysis."""
+        
+        # First, try to use semantic analysis for better timestamp accuracy
+        try:
+            semantic_timestamps = self._generate_semantic_timestamps(
+                raw_transcript, video_id, count
+            )
+            
+            if semantic_timestamps and len(semantic_timestamps) >= count // 2:
+                self.logger.info(f"Semantic analysis generated {len(semantic_timestamps)} high-quality timestamps")
+                return {
+                    'timestamps': semantic_timestamps,
+                    'count': len(semantic_timestamps),
+                    'requested_count': count,
+                    'video_id': video_id,
+                    'generation_metadata': {
+                        'method': 'semantic_analysis',
+                        'text': 'Generated using advanced semantic analysis',
+                        'model': 'SemanticAnalysisService'
+                    }
+                }
+        except Exception as e:
+            self.logger.warning(f"Semantic analysis failed, falling back to LLM: {str(e)}")
+        
+        # Fallback to original LLM-based method
         # Format transcript for processing
         transcript_text = self._format_transcript_for_analysis(raw_transcript)
         
@@ -494,6 +518,67 @@ Do not include any other text or explanations."""
             'video_id': video_id,
             'generation_metadata': result
         }
+    
+    def _generate_semantic_timestamps(
+        self, 
+        raw_transcript: List[Dict[str, Any]], 
+        video_id: str, 
+        count: int
+    ) -> List[Dict[str, Any]]:
+        """Generate timestamps using semantic analysis for improved accuracy."""
+        try:
+            # Import semantic analysis service
+            from ..services.semantic_analysis_service import create_semantic_analysis_service
+            
+            # Create semantic analysis service
+            semantic_service = create_semantic_analysis_service()
+            
+            # Analyze transcript
+            analysis_result = semantic_service.analyze_transcript(
+                raw_transcript=raw_transcript,
+                video_id=video_id,
+                video_title="",  # We don't have title here, but service can work without it
+                target_timestamp_count=count
+            )
+            
+            if analysis_result['status'] != 'success':
+                self.logger.warning(f"Semantic analysis failed: {analysis_result.get('reason', 'Unknown error')}")
+                return []
+            
+            semantic_timestamps = analysis_result.get('timestamps', [])
+            
+            if not semantic_timestamps:
+                self.logger.warning("Semantic analysis returned no timestamps")
+                return []
+            
+            # Convert semantic timestamps to the expected format
+            converted_timestamps = []
+            for semantic_ts in semantic_timestamps:
+                converted_timestamps.append({
+                    'timestamp_seconds': semantic_ts.timestamp_seconds,
+                    'timestamp_formatted': semantic_ts.timestamp_formatted,
+                    'description': semantic_ts.description,
+                    'importance_rating': semantic_ts.importance_rating,
+                    'youtube_url': semantic_ts.youtube_url,
+                    'semantic_metadata': {
+                        'cluster_id': semantic_ts.semantic_cluster_id,
+                        'cluster_theme': semantic_ts.cluster_theme,
+                        'keywords': semantic_ts.semantic_keywords,
+                        'confidence_score': semantic_ts.confidence_score,
+                        'context_before': semantic_ts.context_before,
+                        'context_after': semantic_ts.context_after
+                    }
+                })
+            
+            self.logger.info(f"Successfully generated {len(converted_timestamps)} semantic timestamps")
+            return converted_timestamps
+            
+        except ImportError as e:
+            self.logger.warning(f"Semantic analysis service not available: {str(e)}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Semantic timestamp generation failed: {str(e)}")
+            return []
     
     def _calculate_timestamp_stats(
         self, 

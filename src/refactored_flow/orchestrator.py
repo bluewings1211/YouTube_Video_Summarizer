@@ -58,6 +58,11 @@ try:
         BatchStatusNode,
         BatchProcessingConfig
     )
+    from ..refactored_nodes.semantic_analysis_nodes import (
+        SemanticAnalysisNode,
+        VectorSearchNode,
+        EnhancedTimestampNode
+    )
     from ..services.video_service import VideoService
     from ..database.connection import get_database_session
     from ..utils.language_detector import (
@@ -82,6 +87,9 @@ except ImportError:
     KeywordExtractionNode = MockNode
     BatchCreationNode = MockNode
     BatchProcessingNode = MockNode
+    SemanticAnalysisNode = MockNode
+    VectorSearchNode = MockNode
+    EnhancedTimestampNode = MockNode
     BatchStatusNode = MockNode
     
     class NodeError: pass
@@ -534,12 +542,14 @@ class YouTubeBatchProcessingFlow(Flow):
         """Execute all nodes in sequential order."""
         results = {}
         
-        # Define node execution order
+        # Define node execution order with semantic analysis integration
         node_order = [
-            'YouTubeDataNode',  # Unified YouTube data acquisition
-            'SummarizationNode', 
-            'TimestampNode',
-            'KeywordExtractionNode'
+            'YouTubeDataNode',      # Unified YouTube data acquisition
+            'SummarizationNode',    # Generate summary 
+            'SemanticAnalysisNode', # Perform semantic analysis and clustering
+            'VectorSearchNode',     # Vector-based search and optimization
+            'EnhancedTimestampNode', # Enhanced timestamp generation (replaces TimestampNode)
+            'KeywordExtractionNode' # Keyword extraction (can benefit from semantic data)
         ]
         
         for node_name in node_order:
@@ -568,6 +578,14 @@ class YouTubeBatchProcessingFlow(Flow):
                 # Perform language detection after YouTube data acquisition
                 if node_name == 'YouTubeDataNode' and result.get('post_status') == 'success':
                     self._perform_language_detection()
+                
+                # Handle semantic analysis fallback
+                if node_name == 'SemanticAnalysisNode' and result.get('post_status') != 'success':
+                    self._handle_semantic_analysis_fallback()
+                
+                # Handle vector search fallback
+                if node_name == 'VectorSearchNode' and result.get('post_status') != 'success':
+                    self._handle_vector_search_fallback()
                 
             except Exception as e:
                 # Handle node error
@@ -1005,10 +1023,14 @@ class YouTubeBatchProcessingFlow(Flow):
         
         # Create node instances
         node_classes = {
-            'YouTubeDataNode': YouTubeDataNode,  # Unified YouTube data acquisition
-            'SummarizationNode': SummarizationNode,
-            'TimestampNode': TimestampNode,
-            'KeywordExtractionNode': KeywordExtractionNode
+            'YouTubeDataNode': YouTubeDataNode,      # Unified YouTube data acquisition
+            'SummarizationNode': SummarizationNode,  # Generate summary
+            'SemanticAnalysisNode': SemanticAnalysisNode,  # Semantic analysis and clustering
+            'VectorSearchNode': VectorSearchNode,    # Vector-based search and optimization
+            'EnhancedTimestampNode': EnhancedTimestampNode,  # Enhanced timestamp generation
+            'KeywordExtractionNode': KeywordExtractionNode,  # Keyword extraction
+            # Keep TimestampNode for backward compatibility (but not in default execution order)
+            'TimestampNode': TimestampNode
         }
         
         for node_name, node_class in node_classes.items():
@@ -1130,6 +1152,42 @@ class YouTubeBatchProcessingFlow(Flow):
             final_result['error_summary'] = error_summary
         
         return final_result
+
+    def _handle_semantic_analysis_fallback(self) -> None:
+        """Handle fallback when semantic analysis fails."""
+        logger.warning("Semantic analysis failed, setting up fallback data")
+        
+        # Set empty semantic analysis data for downstream nodes
+        self.store['semantic_analysis_result'] = {
+            'status': 'fallback',
+            'reason': 'semantic_analysis_failed',
+            'timestamps': [],
+            'semantic_clusters': [],
+            'semantic_keywords': [],
+            'semantic_metrics': {}
+        }
+        self.store['semantic_clusters'] = []
+        self.store['semantic_keywords'] = []
+        self.store['semantic_metrics'] = {}
+        self.store['semantic_timestamps'] = []
+        
+        logger.info("Semantic analysis fallback data prepared")
+
+    def _handle_vector_search_fallback(self) -> None:
+        """Handle fallback when vector search fails."""
+        logger.warning("Vector search failed, setting up fallback data")
+        
+        # Set empty vector search data for downstream nodes
+        self.store['vector_search_result'] = {
+            'exec_status': 'fallback',
+            'reason': 'vector_search_failed',
+            'coherence_analysis': {'coherence_score': 0.0, 'analysis': 'fallback'},
+            'optimized_timestamps': []
+        }
+        self.store['coherence_analysis'] = {'coherence_score': 0.0, 'analysis': 'fallback'}
+        self.store['optimized_timestamps'] = []
+        
+        logger.info("Vector search fallback data prepared")
 
     def _prepare_error_result(self, error_info: WorkflowError) -> Dict[str, Any]:
         """Prepare an error result."""

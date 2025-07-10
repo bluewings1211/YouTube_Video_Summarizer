@@ -835,8 +835,19 @@ async def summarize_video(
         
         for timestamp_data in timestamps:
             if isinstance(timestamp_data, dict):
-                # Extract timestamp info
-                timestamp_str = timestamp_data.get('timestamp', '00:00')
+                # Extract timestamp info - use formatted timestamp if available, otherwise format from seconds
+                timestamp_str = timestamp_data.get('timestamp_formatted')
+                if not timestamp_str:
+                    # Try to get from timestamp field (legacy)
+                    timestamp_str = timestamp_data.get('timestamp')
+                    if not timestamp_str or timestamp_str == '00:00':
+                        # Use timestamp_seconds if available to generate proper timestamp
+                        timestamp_seconds_raw = timestamp_data.get('timestamp_seconds', 0)
+                        if timestamp_seconds_raw and timestamp_seconds_raw > 0:
+                            timestamp_str = format_seconds_to_timestamp(timestamp_seconds_raw)
+                        else:
+                            timestamp_str = '00:00'  # Final fallback
+                
                 description = timestamp_data.get('description', 'Key moment')
                 importance = timestamp_data.get('importance_rating', 5)
                 
@@ -845,8 +856,11 @@ async def summarize_video(
                 base_url = f"https://www.youtube.com/watch?v={video_id}"
                 
                 # Convert timestamp to seconds for URL parameter
-                timestamp_seconds = convert_timestamp_to_seconds(timestamp_str)
-                timestamped_url = f"{base_url}&t={timestamp_seconds}s"
+                timestamp_seconds = timestamp_data.get('timestamp_seconds')
+                if timestamp_seconds is None:
+                    timestamp_seconds = convert_timestamp_to_seconds(timestamp_str)
+                
+                timestamped_url = f"{base_url}&t={int(timestamp_seconds)}s"
                 
                 timestamped_segments.append(TimestampedSegment(
                     timestamp=timestamp_str,
@@ -995,6 +1009,22 @@ def convert_timestamp_to_seconds(timestamp_str: str) -> int:
             return 0
     except (ValueError, TypeError):
         return 0
+
+
+def format_seconds_to_timestamp(seconds: float) -> str:
+    """Convert seconds to timestamp string (MM:SS or HH:MM:SS format)."""
+    try:
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
+    except (ValueError, TypeError):
+        return "00:00"
 
 
 # Database dependency for endpoints

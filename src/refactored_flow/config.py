@@ -134,13 +134,43 @@ class WorkflowConfig:
             ),
             'TimestampNode': NodeConfig(
                 name='TimestampNode',
-                enabled=True,
+                enabled=False,  # Disabled in favor of EnhancedTimestampNode
                 required=False,
                 max_retries=3,
                 retry_delay=2.0,
                 timeout_seconds=90,
                 dependencies=['YouTubeDataNode'],  # Updated dependency
                 output_keys=['timestamp_data']
+            ),
+            'SemanticAnalysisNode': NodeConfig(
+                name='SemanticAnalysisNode',
+                enabled=True,
+                required=False,
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=180,  # Longer timeout for semantic analysis
+                dependencies=['YouTubeDataNode'],
+                output_keys=['semantic_analysis_result', 'semantic_clusters', 'semantic_keywords', 'semantic_metrics']
+            ),
+            'VectorSearchNode': NodeConfig(
+                name='VectorSearchNode',
+                enabled=True,
+                required=False,
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=120,
+                dependencies=['SemanticAnalysisNode'],
+                output_keys=['vector_search_result', 'coherence_analysis', 'optimized_timestamps']
+            ),
+            'EnhancedTimestampNode': NodeConfig(
+                name='EnhancedTimestampNode',
+                enabled=True,
+                required=False,
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=120,
+                dependencies=['SemanticAnalysisNode'],  # Can work with or without VectorSearchNode
+                output_keys=['enhanced_timestamps', 'enhanced_timestamp_metadata']
             ),
             'KeywordExtractionNode': NodeConfig(
                 name='KeywordExtractionNode',
@@ -149,7 +179,7 @@ class WorkflowConfig:
                 max_retries=3,
                 retry_delay=1.5,
                 timeout_seconds=60,
-                dependencies=['YouTubeDataNode'],  # Updated dependency
+                dependencies=['YouTubeDataNode'],  # Can benefit from semantic analysis but not required
                 output_keys=['keywords_data']
             )
         }

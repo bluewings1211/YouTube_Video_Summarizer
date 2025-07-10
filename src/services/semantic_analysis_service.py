@@ -128,6 +128,19 @@ class SemanticAnalysisService:
         self.use_vector_optimization = True
         self.vector_diversity_weight = 0.3
         
+        # Performance optimization settings
+        self.enable_caching = True
+        self.enable_parallel_processing = True
+        self.max_segments_for_full_analysis = 500  # Switch to sampling for larger transcripts
+        self.segment_sampling_ratio = 0.6  # Use 60% of segments when sampling
+        self.early_termination_threshold = 0.2  # Quality threshold for early termination
+        self.memory_optimization = True
+        
+        # Caching
+        self.analysis_cache = {}
+        self.embedding_cache = {}
+        self.cluster_cache = {}
+        
     def analyze_transcript(
         self, 
         raw_transcript: List[Dict[str, Any]], 
@@ -136,7 +149,7 @@ class SemanticAnalysisService:
         target_timestamp_count: int = 5
     ) -> Dict[str, Any]:
         """
-        Perform comprehensive semantic analysis on transcript data.
+        Perform comprehensive semantic analysis on transcript data with performance optimizations.
         
         Args:
             raw_transcript: Raw transcript data from YouTube
@@ -147,47 +160,66 @@ class SemanticAnalysisService:
         Returns:
             Dict containing semantic analysis results
         """
-        self.logger.info(f"Starting semantic analysis for video {video_id}")
+        start_time = datetime.utcnow()
+        self.logger.info(f"Starting optimized semantic analysis for video {video_id}")
         
         try:
-            # Step 1: Parse and structure transcript segments
-            segments = self._parse_transcript_segments(raw_transcript)
+            # Check cache first
+            cache_key = self._generate_cache_key(raw_transcript, video_id, target_timestamp_count)
+            if self.enable_caching and cache_key in self.analysis_cache:
+                self.logger.info(f"Returning cached analysis for video {video_id}")
+                cached_result = self.analysis_cache[cache_key].copy()
+                cached_result['cache_hit'] = True
+                return cached_result
+            
+            # Step 1: Parse and structure transcript segments with optimization
+            segments = self._parse_transcript_segments_optimized(raw_transcript)
             if not segments:
                 return self._create_empty_result("No valid transcript segments found")
             
-            # Step 2: Perform semantic clustering
-            clusters = self._perform_semantic_clustering(segments, video_title)
+            # Early quality assessment - terminate early for low-quality inputs
+            if self._should_terminate_early(segments):
+                self.logger.info(f"Early termination for video {video_id} - low quality input")
+                return self._create_early_termination_result(segments, video_id)
+            
+            # Step 2: Perform optimized semantic clustering
+            clusters = self._perform_semantic_clustering_optimized(segments, video_title)
             if not clusters:
                 return self._create_empty_result("No semantic clusters identified")
             
-            # Step 3: Extract semantic keywords
-            all_keywords = self._extract_semantic_keywords(clusters)
+            # Step 3: Extract semantic keywords efficiently
+            all_keywords = self._extract_semantic_keywords_optimized(clusters)
             
-            # Step 4: Generate enhanced timestamps with vector optimization
+            # Step 4: Generate enhanced timestamps with performance optimization
             if self.use_vector_optimization and self.vector_search_engine:
-                timestamps = self._generate_vector_optimized_timestamps(
+                timestamps = self._generate_vector_optimized_timestamps_fast(
                     clusters, 
                     video_id, 
                     target_timestamp_count
                 )
             else:
-                timestamps = self._generate_semantic_timestamps(
+                timestamps = self._generate_semantic_timestamps_fast(
                     clusters, 
                     video_id, 
                     target_timestamp_count
                 )
             
-            # Step 5: Calculate semantic metrics with vector analysis
-            metrics = self._calculate_semantic_metrics(segments, clusters, timestamps)
+            # Step 5: Calculate semantic metrics efficiently
+            metrics = self._calculate_semantic_metrics_optimized(segments, clusters, timestamps)
             
-            # Step 6: Add vector search analysis if available
-            if self.vector_search_engine:
+            # Step 6: Add vector search analysis if available (with optimization)
+            if self.vector_search_engine and len(segments) <= self.max_segments_for_full_analysis:
                 try:
                     coherence_analysis = self.vector_search_engine.analyze_semantic_coherence(segments)
                     metrics['vector_analysis'] = coherence_analysis
                 except Exception as e:
                     self.logger.warning(f"Vector coherence analysis failed: {str(e)}")
                     metrics['vector_analysis'] = {"analysis": "failed"}
+            else:
+                metrics['vector_analysis'] = {"analysis": "skipped_for_performance"}
+            
+            # Calculate processing time
+            processing_time = (datetime.utcnow() - start_time).total_seconds()
             
             result = {
                 'status': 'success',
@@ -202,12 +234,25 @@ class SemanticAnalysisService:
                 'semantic_metrics': metrics,
                 'processing_metadata': {
                     'llm_provider': 'smart_client',
-                    'semantic_method': 'clustering_and_embedding',
-                    'confidence_avg': np.mean([ts.confidence_score for ts in timestamps]) if timestamps and HAS_NUMPY else 0.5
+                    'semantic_method': 'optimized_clustering_and_embedding',
+                    'confidence_avg': np.mean([ts.confidence_score for ts in timestamps]) if timestamps and HAS_NUMPY else 0.5,
+                    'processing_time_seconds': processing_time,
+                    'optimization_enabled': True,
+                    'segments_processed': len(segments),
+                    'cache_hit': False
                 }
             }
             
-            self.logger.info(f"Semantic analysis completed: {len(timestamps)} timestamps from {len(clusters)} clusters")
+            # Cache the result for future use
+            if self.enable_caching:
+                self.analysis_cache[cache_key] = result.copy()
+                # Limit cache size to prevent memory issues
+                if len(self.analysis_cache) > 100:
+                    # Remove oldest entries
+                    oldest_key = next(iter(self.analysis_cache))
+                    del self.analysis_cache[oldest_key]
+            
+            self.logger.info(f"Optimized semantic analysis completed in {processing_time:.2f}s: {len(timestamps)} timestamps from {len(clusters)} clusters")
             return result
             
         except Exception as e:
@@ -735,6 +780,143 @@ Focus on identifying natural content boundaries and meaningful topic shifts."""
             'processing_metadata': {}
         }
     
+    # Performance optimization methods
+    def _generate_cache_key(self, raw_transcript: List[Dict[str, Any]], video_id: str, target_count: int) -> str:
+        """Generate a cache key for the analysis."""
+        import hashlib
+        # Create a hash of the transcript content for caching
+        transcript_text = str(sorted([entry.get('text', '') for entry in raw_transcript if entry.get('text')]))
+        content_hash = hashlib.md5(transcript_text.encode()).hexdigest()[:16]
+        return f"{video_id}_{target_count}_{content_hash}"
+    
+    def _parse_transcript_segments_optimized(self, raw_transcript: List[Dict[str, Any]]) -> List[TranscriptSegment]:
+        """Optimized version of transcript segment parsing."""
+        if len(raw_transcript) > self.max_segments_for_full_analysis:
+            # Sample segments for large transcripts
+            import random
+            sample_size = int(len(raw_transcript) * self.segment_sampling_ratio)
+            sampled_transcript = random.sample(raw_transcript, sample_size)
+            self.logger.info(f"Sampling {sample_size} segments from {len(raw_transcript)} for performance")
+            return self._parse_transcript_segments(sampled_transcript)
+        else:
+            return self._parse_transcript_segments(raw_transcript)
+    
+    def _should_terminate_early(self, segments: List[TranscriptSegment]) -> bool:
+        """Determine if we should terminate early due to low quality input."""
+        if not segments:
+            return True
+        
+        # Check for minimum viable content
+        if len(segments) < 5:
+            return True
+        
+        # Check average segment quality
+        total_words = sum(len(segment.text.split()) for segment in segments)
+        avg_words_per_segment = total_words / len(segments)
+        
+        if avg_words_per_segment < 2:  # Very short segments
+            return True
+        
+        # Check for content diversity
+        unique_texts = set(segment.text.lower() for segment in segments)
+        diversity_ratio = len(unique_texts) / len(segments)
+        
+        if diversity_ratio < self.early_termination_threshold:
+            return True
+        
+        return False
+    
+    def _create_early_termination_result(self, segments: List[TranscriptSegment], video_id: str) -> Dict[str, Any]:
+        """Create a minimal result for early termination."""
+        return {
+            'status': 'early_termination',
+            'reason': 'low_quality_input',
+            'video_id': video_id,
+            'analysis_timestamp': datetime.utcnow().isoformat(),
+            'segments_count': len(segments),
+            'clusters_count': 0,
+            'timestamps_count': 0,
+            'timestamps': [],
+            'semantic_clusters': [],
+            'semantic_keywords': [],
+            'semantic_metrics': {'early_termination': True},
+            'processing_metadata': {
+                'optimization_enabled': True,
+                'early_termination': True,
+                'reason': 'insufficient_quality'
+            }
+        }
+    
+    def _perform_semantic_clustering_optimized(
+        self, 
+        segments: List[TranscriptSegment], 
+        video_title: str = ""
+    ) -> List[SemanticCluster]:
+        """Optimized semantic clustering with caching and smart algorithm selection."""
+        cache_key = f"clustering_{len(segments)}_{hash(video_title)}"
+        
+        if self.enable_caching and cache_key in self.cluster_cache:
+            self.logger.debug("Using cached clustering result")
+            return self.cluster_cache[cache_key]
+        
+        # Smart algorithm selection based on content size
+        if len(segments) < 20:
+            algorithm = 'structure'
+        elif len(segments) < 100:
+            algorithm = 'tfidf'
+        else:
+            algorithm = 'embedding' if HAS_SKLEARN else 'tfidf'
+        
+        try:
+            target_clusters = min(self.max_clusters, max(3, len(segments) // 5))
+            
+            clustering_result = self.semantic_analyzer.analyze_segments(
+                segments=segments,
+                algorithm=algorithm,
+                target_clusters=target_clusters
+            )
+            
+            clusters = clustering_result.clusters if clustering_result.clusters else []
+            
+            # Cache the result
+            if self.enable_caching and clusters:
+                self.cluster_cache[cache_key] = clusters
+                if len(self.cluster_cache) > 50:
+                    oldest_key = next(iter(self.cluster_cache))
+                    del self.cluster_cache[oldest_key]
+            
+            return clusters
+            
+        except Exception as e:
+            self.logger.warning(f"Optimized clustering failed: {str(e)}, using fallback")
+            return self._fallback_clustering(segments)
+    
+    def clear_caches(self) -> None:
+        """Clear all caches to free memory."""
+        self.analysis_cache.clear()
+        self.embedding_cache.clear() 
+        self.cluster_cache.clear()
+        if self.vector_search_engine:
+            self.vector_search_engine.clear_cache()
+        self.logger.info("All caches cleared")
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get performance statistics."""
+        return {
+            'cache_sizes': {
+                'analysis_cache': len(self.analysis_cache),
+                'embedding_cache': len(self.embedding_cache),
+                'cluster_cache': len(self.cluster_cache)
+            },
+            'settings': {
+                'enable_caching': self.enable_caching,
+                'enable_parallel_processing': self.enable_parallel_processing,
+                'max_segments_for_full_analysis': self.max_segments_for_full_analysis,
+                'segment_sampling_ratio': self.segment_sampling_ratio,
+                'early_termination_threshold': self.early_termination_threshold
+            }
+        }
+
     def _create_error_result(self, error_message: str) -> Dict[str, Any]:
         """Create an error result."""
         return {
@@ -771,3 +953,5 @@ def create_semantic_analysis_service(
         SemanticAnalysisService instance
     """
     return SemanticAnalysisService(smart_llm_client, semantic_analyzer, vector_search_engine)
+
+
