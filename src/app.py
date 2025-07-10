@@ -201,6 +201,18 @@ except ImportError:
     except ImportError:
         logger.warning("Could not import history router - history endpoints will not be available")
 
+# Include batch processing router
+try:
+    from .api.batch import router as batch_router
+    app.include_router(batch_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.batch import router as batch_router
+        app.include_router(batch_router)
+    except ImportError:
+        logger.warning("Could not import batch router - batch processing endpoints will not be available")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -570,6 +582,13 @@ async def root():
             "history": "/api/v1/history/videos",
             "video_detail": "/api/v1/history/videos/{id}",
             "video_statistics": "/api/v1/history/statistics",
+            "batch_create": "/api/v1/batch/batches",
+            "batch_list": "/api/v1/batch/batches",
+            "batch_detail": "/api/v1/batch/batches/{batch_id}",
+            "batch_progress": "/api/v1/batch/batches/{batch_id}/progress",
+            "batch_start": "/api/v1/batch/batches/{batch_id}/start",
+            "batch_cancel": "/api/v1/batch/batches/{batch_id}/cancel",
+            "batch_statistics": "/api/v1/batch/statistics",
             "health": "/health",
             "database_health": "/health/database",
             "metrics": "/metrics",

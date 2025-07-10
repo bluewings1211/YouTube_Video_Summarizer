@@ -19,6 +19,7 @@ from .youtube_data_node import YouTubeDataNode
 from .llm_nodes import SummarizationNode, KeywordExtractionNode
 from .validation_nodes import BaseProcessingNode, NodeError
 from .summary_nodes import TimestampNode
+from .batch_processing_nodes import BatchCreationNode, BatchProcessingNode, BatchStatusNode, BatchProcessingConfig
 
 __all__ = [
     'YouTubeTranscriptNode',
@@ -27,5 +28,9 @@ __all__ = [
     'KeywordExtractionNode',
     'TimestampNode',
     'BaseProcessingNode',
-    'NodeError'
+    'NodeError',
+    'BatchCreationNode',
+    'BatchProcessingNode',
+    'BatchStatusNode',
+    'BatchProcessingConfig'
 ]

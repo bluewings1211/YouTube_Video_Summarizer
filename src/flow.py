@@ -14,6 +14,7 @@ The original implementation has been split into focused modules:
 # Import all refactored flow components
 from .refactored_flow import (
     YouTubeSummarizerFlow,
+    YouTubeBatchProcessingFlow,
     WorkflowConfig,
     NodeConfig,
     DataFlowConfig,
@@ -28,6 +29,7 @@ from .refactored_flow import (
 # For backward compatibility, ensure all original exports are available
 __all__ = [
     'YouTubeSummarizerFlow',
+    'YouTubeBatchProcessingFlow',
     'WorkflowConfig',
     'NodeConfig',
     'DataFlowConfig', 

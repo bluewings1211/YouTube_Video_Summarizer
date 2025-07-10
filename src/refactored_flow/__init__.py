@@ -13,13 +13,14 @@ workflow orchestration:
 All components maintain the PocketFlow patterns for consistency.
 """
 
-from .orchestrator import YouTubeSummarizerFlow
+from .orchestrator import YouTubeSummarizerFlow, YouTubeBatchProcessingFlow
 from .config import WorkflowConfig, NodeConfig, DataFlowConfig, LanguageProcessingConfig
 from .error_handler import WorkflowError, CircuitBreaker, ErrorSeverity
 from .monitoring import WorkflowMetrics, NodeMetrics
 
 __all__ = [
     'YouTubeSummarizerFlow',
+    'YouTubeBatchProcessingFlow',
     'WorkflowConfig',
     'NodeConfig', 
     'DataFlowConfig',

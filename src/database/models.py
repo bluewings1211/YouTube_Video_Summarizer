@@ -290,6 +290,19 @@ def get_all_models_with_batch():
     return get_all_models() + get_all_batch_models()
 
 
+def get_all_models_with_status():
+    """Get all model classes including status tracking models."""
+    from .status_models import get_all_status_models
+    return get_all_models() + get_all_status_models()
+
+
+def get_all_models_complete():
+    """Get all model classes including batch and status tracking models."""
+    from .batch_models import get_all_batch_models
+    from .status_models import get_all_status_models
+    return get_all_models() + get_all_batch_models() + get_all_status_models()
+
+
 def create_tables(engine):
     """Create all tables in the database."""
     Base.metadata.create_all(bind=engine)
@@ -302,6 +315,15 @@ def create_all_tables(engine):
     create_batch_tables(engine)
 
 
+def create_all_tables_complete(engine):
+    """Create all tables including batch processing and status tracking tables."""
+    from .batch_models import create_batch_tables
+    from .status_models import create_status_tables
+    Base.metadata.create_all(bind=engine)
+    create_batch_tables(engine)
+    create_status_tables(engine)
+
+
 def drop_tables(engine):
     """Drop all tables from the database."""
     Base.metadata.drop_all(bind=engine)
@@ -310,5 +332,14 @@ def drop_tables(engine):
 def drop_all_tables(engine):
     """Drop all tables including batch processing tables."""
     from .batch_models import drop_batch_tables
+    drop_batch_tables(engine)
+    Base.metadata.drop_all(bind=engine)
+
+
+def drop_all_tables_complete(engine):
+    """Drop all tables including batch processing and status tracking tables."""
+    from .batch_models import drop_batch_tables
+    from .status_models import drop_status_tables
+    drop_status_tables(engine)
     drop_batch_tables(engine)
     Base.metadata.drop_all(bind=engine)

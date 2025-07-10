@@ -52,6 +52,12 @@ try:
         KeywordExtractionNode,
         NodeError
     )
+    from ..refactored_nodes.batch_processing_nodes import (
+        BatchCreationNode,
+        BatchProcessingNode,
+        BatchStatusNode,
+        BatchProcessingConfig
+    )
     from ..services.video_service import VideoService
     from ..database.connection import get_database_session
     from ..utils.language_detector import (
@@ -74,8 +80,12 @@ except ImportError:
     SummarizationNode = MockNode
     TimestampNode = MockNode
     KeywordExtractionNode = MockNode
+    BatchCreationNode = MockNode
+    BatchProcessingNode = MockNode
+    BatchStatusNode = MockNode
     
     class NodeError: pass
+    class BatchProcessingConfig: pass
     class LanguageCode:
         ENGLISH = "en"
         CHINESE_SIMPLIFIED = "zh-CN"
@@ -250,6 +260,254 @@ class YouTubeSummarizerFlow(Flow):
                 return self._execute_fallback_workflow(input_data, error_info)
             
             return self._prepare_error_result(error_info)
+
+
+class YouTubeBatchProcessingFlow(Flow):
+    """
+    Workflow for batch processing multiple YouTube videos.
+    
+    This flow orchestrates the batch processing of multiple YouTube URLs
+    through a queue-based system with worker management.
+    """
+    
+    def __init__(self, 
+                 config: Optional[WorkflowConfig] = None,
+                 batch_config: Optional[BatchProcessingConfig] = None,
+                 enable_monitoring: bool = True,
+                 video_service=None):
+        """
+        Initialize the YouTube batch processing workflow.
+        
+        Args:
+            config: Workflow configuration
+            batch_config: Batch processing specific configuration
+            enable_monitoring: Whether to enable performance monitoring
+            video_service: Optional video service for database persistence
+        """
+        super().__init__("YouTubeBatchProcessingFlow")
+        
+        # Initialize configuration
+        self.config = config or create_default_workflow_config()
+        self.batch_config = batch_config or BatchProcessingConfig()
+        self.enable_monitoring = enable_monitoring
+        
+        # Initialize core components
+        self.error_handler = ErrorHandler(self.name)
+        self.monitor = WorkflowMonitor(self.name) if enable_monitoring else None
+        self.node_instances: Dict[str, Node] = {}
+        self.video_service = video_service
+        
+        # Initialize batch processing nodes
+        self._initialize_batch_nodes()
+        
+        # Initialize circuit breakers
+        self._initialize_circuit_breakers()
+        
+        logger.info(f"YouTubeBatchProcessingFlow initialized with {len(self.nodes)} nodes")
+
+    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute the complete batch processing workflow.
+        
+        Args:
+            input_data: Dictionary containing 'batch_urls' and optional 'batch_config'
+            
+        Returns:
+            Dictionary containing all processing results or error information
+        """
+        logger.info(f"Starting YouTube batch processing workflow with input: {input_data}")
+        
+        # Start monitoring
+        if self.monitor:
+            self.monitor.start_workflow()
+        
+        try:
+            # Validate input
+            self._validate_batch_input(input_data)
+            
+            # Initialize store with input data
+            self.store = Store()
+            self.store.update(input_data)
+            
+            # Execute batch processing workflow
+            result = self._execute_batch_workflow()
+            
+            # Finalize monitoring
+            if self.monitor:
+                self.monitor.finish_workflow(success=True)
+            
+            logger.info("Batch processing workflow completed successfully")
+            return self._prepare_batch_final_result(result)
+            
+        except Exception as e:
+            # Handle workflow error
+            error_info = self.error_handler.handle_node_error(e, "batch_workflow", "execution")
+            
+            # Finalize monitoring
+            if self.monitor:
+                self.monitor.finish_workflow(success=False)
+            
+            return self._prepare_error_result(error_info)
+
+    def _execute_batch_workflow(self) -> Dict[str, Any]:
+        """Execute the batch processing workflow with all nodes."""
+        results = {}
+        
+        # Define batch processing node execution order
+        batch_node_order = [
+            'BatchCreationNode',    # Create batch and validate URLs
+            'BatchProcessingNode',  # Process all batch items
+            'BatchStatusNode'       # Monitor status and provide final report
+        ]
+        
+        for node_name in batch_node_order:
+            if not self._should_execute_node(node_name):
+                logger.info(f"Skipping disabled batch node: {node_name}")
+                continue
+            
+            try:
+                # Check circuit breaker
+                if not self.error_handler.can_node_execute(node_name):
+                    logger.warning(f"Circuit breaker open for {node_name}, skipping")
+                    continue
+                
+                # Execute node
+                result = self._execute_single_node(node_name)
+                results[node_name] = result
+                
+                # Log node completion
+                logger.debug(f"Batch node {node_name} completed with result keys: {list(result.keys())}")
+                
+                # Record success
+                self.error_handler.handle_node_success(node_name)
+                if self.monitor:
+                    self.monitor.finish_node(node_name, "success")
+                
+                # Check if we should continue based on node results
+                if not self._should_continue_batch_processing(node_name, result):
+                    logger.info(f"Stopping batch processing after {node_name}")
+                    break
+                
+            except Exception as e:
+                # Handle node error
+                error_info = self.error_handler.handle_node_error(e, node_name)
+                results[node_name] = {'error': error_info.to_dict()}
+                
+                if self.monitor:
+                    self.monitor.record_error(node_name)
+                    self.monitor.finish_node(node_name, "failed")
+                
+                # Check if node is required for batch processing
+                if node_name in ['BatchCreationNode']:  # Critical nodes
+                    raise e
+                
+                logger.warning(f"Non-critical batch node {node_name} failed, continuing workflow")
+        
+        return results
+
+    def _initialize_batch_nodes(self) -> None:
+        """Initialize batch processing nodes."""
+        # Create batch processing node instances
+        batch_node_classes = {
+            'BatchCreationNode': BatchCreationNode,
+            'BatchProcessingNode': BatchProcessingNode,
+            'BatchStatusNode': BatchStatusNode
+        }
+        
+        for node_name, node_class in batch_node_classes.items():
+            # Create node with batch configuration
+            node_kwargs = {
+                'max_retries': 3,
+                'retry_delay': 2.0,
+                'config': self.batch_config
+            }
+            
+            self.node_instances[node_name] = node_class(**node_kwargs)
+            logger.debug(f"Initialized batch node: {node_name}")
+
+    def _initialize_circuit_breakers(self) -> None:
+        """Initialize circuit breakers for batch processing nodes."""
+        for node_name in self.node_instances.keys():
+            self.error_handler.create_circuit_breaker(
+                node_name, 
+                self.config.circuit_breaker_config
+            )
+
+    def _should_execute_node(self, node_name: str) -> bool:
+        """Check if a batch processing node should be executed."""
+        # All batch processing nodes are required by default
+        return node_name in self.node_instances
+
+    def _should_continue_batch_processing(self, node_name: str, result: Dict[str, Any]) -> bool:
+        """Determine if batch processing should continue after a node completes."""
+        # Check if the node completed successfully
+        post_result = result.get('post_result', {})
+        if post_result.get('processing_status') != 'success':
+            logger.warning(f"Node {node_name} did not complete successfully")
+            return False
+        
+        # Special handling for different nodes
+        if node_name == 'BatchCreationNode':
+            # Must have successfully created a batch
+            return post_result.get('batch_created', False)
+        
+        elif node_name == 'BatchProcessingNode':
+            # Should continue to status monitoring regardless of processing results
+            return True
+        
+        elif node_name == 'BatchStatusNode':
+            # This is the final node
+            return False
+        
+        return True
+
+    def _validate_batch_input(self, input_data: Dict[str, Any]) -> None:
+        """Validate input data for batch processing."""
+        if not isinstance(input_data, dict):
+            raise ValueError("Input data must be a dictionary")
+        
+        if 'batch_urls' not in input_data:
+            raise ValueError("Missing required 'batch_urls' in input data")
+        
+        batch_urls = input_data['batch_urls']
+        if not isinstance(batch_urls, list) or not batch_urls:
+            raise ValueError("batch_urls must be a non-empty list")
+
+    def _prepare_batch_final_result(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare the final batch processing result."""
+        # Extract data from store for API compatibility
+        store_data = dict(self.store)
+        
+        # Extract batch information
+        batch_id = store_data.get('batch_id', 'unknown')
+        batch_status = store_data.get('batch_final_status', 'unknown')
+        batch_statistics = store_data.get('batch_statistics', {})
+        
+        # Build the final result structure
+        final_result = {
+            'status': 'success',
+            'batch_id': batch_id,
+            'batch_status': batch_status,
+            'batch_statistics': batch_statistics,
+            'results': results,
+            'store_data': store_data,
+            'workflow_metadata': {
+                'execution_time': time.time(),
+                'nodes_executed': list(results.keys()),
+                'workflow_type': 'batch_processing'
+            }
+        }
+        
+        # Add monitoring data if available
+        if self.monitor and self.monitor.metrics:
+            final_result['metrics'] = self.monitor.metrics.get_summary()
+        
+        # Add error summary
+        error_summary = self.error_handler.get_error_summary()
+        if error_summary['total_errors'] > 0:
+            final_result['error_summary'] = error_summary
+        
+        return final_result
 
     def _execute_workflow_with_timeout(self) -> Dict[str, Any]:
         """Execute the workflow with timeout protection."""
