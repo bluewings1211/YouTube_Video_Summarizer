@@ -28,6 +28,10 @@ from ..database.exceptions import (
 )
 from ..database.transaction_manager import TransactionManager, managed_transaction
 from ..utils.error_messages import ErrorMessages
+from ..utils.webhook_client import (
+    WebhookClient, WebhookConfig, WebhookRequest, WebhookAuthType,
+    WebhookStatus
+)
 
 logger = logging.getLogger(__name__)
 
@@ -786,16 +790,64 @@ class NotificationService:
         notification: Notification,
         config: NotificationConfig
     ) -> NotificationDeliveryResult:
-        """Send webhook notification."""
-        # This is a placeholder implementation
-        # In a real implementation, you would use an HTTP client to send the webhook
-        # For now, we'll simulate success
-        return NotificationDeliveryResult(
-            notification_id=notification.notification_id,
-            status=NotificationStatus.DELIVERED,
-            delivered_at=datetime.utcnow(),
-            response_data={'status': 'success', 'message': 'Webhook delivered (simulated)'}
-        )
+        """Send webhook notification using webhook client."""
+        try:
+            # Create webhook configuration
+            webhook_config = self._create_webhook_config(config)
+            
+            # Create webhook request
+            webhook_request = WebhookRequest(
+                payload=notification.payload or {},
+                event_type=notification.event_type.value,
+                source=notification.event_source,
+                request_id=notification.notification_id
+            )
+            
+            # Add custom headers if configured
+            if config.template_config and 'headers' in config.template_config:
+                webhook_request.headers = config.template_config['headers']
+            
+            # Send webhook
+            with WebhookClient(webhook_config) as client:
+                webhook_response = client.send(webhook_request)
+            
+            # Convert webhook response to notification delivery result
+            if webhook_response.is_success:
+                return NotificationDeliveryResult(
+                    notification_id=notification.notification_id,
+                    status=NotificationStatus.DELIVERED,
+                    delivered_at=datetime.utcnow(),
+                    response_data={
+                        'status_code': webhook_response.status_code,
+                        'response_text': webhook_response.response_text,
+                        'response_headers': webhook_response.response_headers,
+                        'final_url': webhook_response.final_url
+                    },
+                    delivery_time_ms=webhook_response.response_time_ms
+                )
+            else:
+                # Map webhook status to notification status
+                notification_status = self._map_webhook_status(webhook_response.status)
+                
+                return NotificationDeliveryResult(
+                    notification_id=notification.notification_id,
+                    status=notification_status,
+                    error_message=webhook_response.error_message,
+                    response_data={
+                        'status_code': webhook_response.status_code,
+                        'response_text': webhook_response.response_text,
+                        'webhook_status': webhook_response.status.value
+                    },
+                    delivery_time_ms=webhook_response.response_time_ms
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to send webhook notification {notification.notification_id}: {str(e)}")
+            return NotificationDeliveryResult(
+                notification_id=notification.notification_id,
+                status=NotificationStatus.FAILED,
+                error_message=f"Webhook delivery failed: {str(e)}"
+            )
 
     def _send_email(
         self,
@@ -824,6 +876,62 @@ class NotificationService:
         
         delay = initial_delay * (backoff_multiplier ** (notification.retry_count - 1))
         return min(delay, max_delay)
+
+    def _create_webhook_config(self, config: NotificationConfig) -> WebhookConfig:
+        """Create webhook configuration from notification config."""
+        # Get auth configuration
+        auth_type = WebhookAuthType.NONE
+        auth_config = None
+        
+        if config.auth_config:
+            auth_type_str = config.auth_config.get('type', 'none')
+            try:
+                auth_type = WebhookAuthType(auth_type_str)
+                auth_config = config.auth_config.get('config', {})
+            except ValueError:
+                logger.warning(f"Invalid auth type {auth_type_str}, using none")
+        
+        # Get retry configuration
+        retry_config = config.retry_config or {}
+        max_retries = retry_config.get('max_retries', 3)
+        retry_delay = retry_config.get('initial_delay_seconds', 60)
+        backoff_multiplier = retry_config.get('backoff_multiplier', 2.0)
+        max_retry_delay = retry_config.get('max_delay_seconds', 3600)
+        
+        # Get timeout configuration
+        template_config = config.template_config or {}
+        timeout_seconds = template_config.get('timeout_seconds', 30)
+        
+        # Get headers
+        headers = template_config.get('default_headers', {})
+        
+        return WebhookConfig(
+            url=config.target_address,
+            method="POST",
+            auth_type=auth_type,
+            auth_config=auth_config,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            retry_delay_seconds=retry_delay,
+            retry_backoff_multiplier=backoff_multiplier,
+            max_retry_delay_seconds=max_retry_delay
+        )
+    
+    def _map_webhook_status(self, webhook_status: WebhookStatus) -> NotificationStatus:
+        """Map webhook status to notification status."""
+        status_mapping = {
+            WebhookStatus.SUCCESS: NotificationStatus.DELIVERED,
+            WebhookStatus.FAILED: NotificationStatus.FAILED,
+            WebhookStatus.TIMEOUT: NotificationStatus.FAILED,
+            WebhookStatus.RATE_LIMITED: NotificationStatus.RETRY_PENDING,
+            WebhookStatus.AUTHENTICATION_FAILED: NotificationStatus.FAILED,
+            WebhookStatus.INVALID_URL: NotificationStatus.FAILED,
+            WebhookStatus.CONNECTION_ERROR: NotificationStatus.RETRY_PENDING,
+            WebhookStatus.PENDING: NotificationStatus.PENDING,
+            WebhookStatus.SENDING: NotificationStatus.SENDING
+        }
+        return status_mapping.get(webhook_status, NotificationStatus.FAILED)
 
     def _log_notification_result(
         self,
