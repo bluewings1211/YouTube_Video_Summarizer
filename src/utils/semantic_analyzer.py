@@ -8,10 +8,14 @@ providing sophisticated methods for clustering content by meaning and importance
 import logging
 import re
 import math
+import os
 from typing import Dict, List, Any, Optional, Tuple, Set
 from datetime import datetime
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+
+# Fix tokenizers parallelism warning
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 try:
     import numpy as np
@@ -30,7 +34,7 @@ except ImportError:
     HAS_SENTENCE_TRANSFORMERS = False
     # Embedding features will use fallback methods
 
-from ..services.semantic_analysis_service import TranscriptSegment, SemanticCluster
+from .semantic_types import TranscriptSegment, SemanticCluster
 
 logger = logging.getLogger(__name__)
 

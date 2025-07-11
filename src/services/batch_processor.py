@@ -19,7 +19,7 @@ from ..services.batch_service import (
     BatchService, BatchItemResult, BatchServiceError
 )
 from ..services.video_service import VideoService
-from ..utils.youtube_utils import extract_video_id_from_url
+from ..utils.validators import extract_youtube_video_id as extract_video_id_from_url
 
 logger = logging.getLogger(__name__)
 

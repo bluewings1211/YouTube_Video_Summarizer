@@ -33,7 +33,7 @@ from ..database.transaction_manager import (
     TransactionManager, managed_transaction, OperationType, TransactionResult
 )
 from ..flow import YouTubeSummarizerFlow
-from ..utils.youtube_utils import extract_video_id_from_url
+from ..utils.validators import extract_youtube_video_id as extract_video_id_from_url
 from ..utils.batch_monitor import get_batch_monitor, BatchMonitor
 from ..utils.batch_logger import get_batch_logger, BatchLogger, EventType, LogLevel, BatchOperationLogger
 
@@ -1046,14 +1046,11 @@ class BatchService:
 
 
 # Dependency injection function for FastAPI
-def get_batch_service(session: Session = None) -> BatchService:
+def get_batch_service() -> BatchService:
     """
     Get BatchService instance for dependency injection.
     
-    Args:
-        session: Database session
-        
     Returns:
         BatchService instance
     """
-    return BatchService(session)
+    return BatchService()

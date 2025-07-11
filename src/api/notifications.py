@@ -22,7 +22,7 @@ from ..services.notification_service import (
     NotificationCreateRequest, NotificationTriggerRequest,
     NotificationDeliveryResult, NotificationStats
 )
-from ..utils.error_messages import ErrorMessages
+from ..utils.error_messages import ErrorMessageProvider
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +352,7 @@ async def create_notification_config(
         logger.error(f"Unexpected error creating notification config: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -390,7 +390,7 @@ async def get_notification_config(
         logger.error(f"Unexpected error getting notification config {config_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -463,7 +463,7 @@ async def update_notification_config(
         logger.error(f"Unexpected error updating notification config {config_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -498,7 +498,7 @@ async def delete_notification_config(
         logger.error(f"Unexpected error deleting notification config {config_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -543,7 +543,7 @@ async def list_notification_configs(
         logger.error(f"Unexpected error listing notification configs: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -597,7 +597,7 @@ async def trigger_notification(
         logger.error(f"Unexpected error triggering notifications: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -637,7 +637,7 @@ async def send_pending_notifications(
         logger.error(f"Unexpected error sending pending notifications: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -677,7 +677,7 @@ async def retry_failed_notifications(
         logger.error(f"Unexpected error retrying failed notifications: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )
 
 
@@ -722,5 +722,5 @@ async def get_notification_stats(
         logger.error(f"Unexpected error getting notification stats: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ErrorMessages.INTERNAL_SERVER_ERROR
+            detail=ErrorMessageProvider.INTERNAL_SERVER_ERROR
         )

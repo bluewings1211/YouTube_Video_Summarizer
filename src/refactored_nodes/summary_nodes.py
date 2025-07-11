@@ -10,7 +10,7 @@ import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from .validation_nodes import BaseProcessingNode, Store
+from .validation_nodes import BaseProcessingNode
 from ..utils.smart_llm_client import SmartLLMClient, TaskRequirements, detect_task_requirements
 from ..services.video_service import VideoService
 
@@ -31,7 +31,7 @@ class TimestampNode(BaseProcessingNode):
         self.default_timestamp_count = 5
         self.video_service = video_service
     
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for timestamp generation by validating input data.
         
@@ -112,7 +112,7 @@ class TimestampNode(BaseProcessingNode):
                 'prep_timestamp': datetime.utcnow().isoformat()
             }
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute timestamp generation with AI analysis.
         
@@ -216,7 +216,7 @@ class TimestampNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process timestamps and update store.
         

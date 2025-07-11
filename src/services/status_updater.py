@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .status_service import StatusService
 from ..database.connection import get_db_session
 from ..database.status_models import ProcessingStatusType, StatusChangeType, ProcessingStatus
-from ..utils.error_messages import ErrorMessages
+from ..utils.error_messages import ErrorMessageProvider
 
 
 class UpdateSourceType(Enum):

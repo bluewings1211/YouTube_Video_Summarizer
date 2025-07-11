@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from .validation_nodes import BaseProcessingNode, Store
+from .validation_nodes import BaseProcessingNode
 from ..utils.youtube_api import YouTubeTranscriptFetcher, YouTubeTranscriptError
 from ..utils.validators import YouTubeURLValidator
 from ..services.video_service import VideoService
@@ -35,7 +35,7 @@ class YouTubeTranscriptNode(BaseProcessingNode):
         self.enable_enhanced_acquisition = enable_enhanced_acquisition
         self.video_service = video_service
     
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for transcript extraction by validating input and checking video support.
         
@@ -118,7 +118,7 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             
             return prep_result
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute transcript fetching with enhanced acquisition capabilities.
         
@@ -201,7 +201,7 @@ class YouTubeTranscriptNode(BaseProcessingNode):
             
             return exec_result
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process transcript data and update store.
         

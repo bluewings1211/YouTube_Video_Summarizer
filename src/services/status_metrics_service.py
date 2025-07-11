@@ -15,7 +15,7 @@ from ..database.status_models import (
     ProcessingStatus, StatusHistory, StatusMetrics,
     ProcessingStatusType, StatusChangeType
 )
-from ..utils.error_messages import ErrorMessages
+from ..utils.error_messages import ErrorMessageProvider
 
 
 class StatusMetricsService:

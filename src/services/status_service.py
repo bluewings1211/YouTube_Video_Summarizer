@@ -17,7 +17,7 @@ from ..database.status_models import (
 )
 from ..database.models import Video
 from ..database.batch_models import BatchItem, ProcessingSession
-from ..utils.error_messages import ErrorMessages
+from ..utils.error_messages import ErrorMessageProvider
 
 
 class StatusService:

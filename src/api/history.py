@@ -8,6 +8,7 @@ with pagination, filtering, and search capabilities.
 import logging
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
+from enum import Enum
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session

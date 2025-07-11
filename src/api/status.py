@@ -15,7 +15,7 @@ from ..database.connection import get_db_session
 from ..database.status_models import ProcessingStatusType, ProcessingPriority, StatusChangeType
 from ..services.status_service import StatusService
 from ..services.status_metrics_service import StatusMetricsService
-from ..utils.error_messages import ErrorMessages
+from ..utils.error_messages import ErrorMessageProvider
 
 
 # Request/Response Models

@@ -10,10 +10,11 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from .validation_nodes import BaseProcessingNode, Store
-from ..services.semantic_analysis_service import create_semantic_analysis_service
-from ..utils.semantic_analyzer import create_semantic_analyzer
-from ..utils.vector_search import create_vector_search_engine
+from .validation_nodes import BaseProcessingNode
+# Lazy imports to avoid circular dependencies
+# from ..services.semantic_analysis_service import create_semantic_analysis_service
+# from ..utils.semantic_analyzer import create_semantic_analyzer
+# from ..utils.vector_search import create_vector_search_engine
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class SemanticAnalysisNode(BaseProcessingNode):
         super().__init__("SemanticAnalysisNode", max_retries, retry_delay)
         self.semantic_service = None
         
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for semantic analysis.
         
@@ -65,6 +66,7 @@ class SemanticAnalysisNode(BaseProcessingNode):
             
             # Initialize semantic analysis service
             try:
+                from ..services.semantic_analysis_service import create_semantic_analysis_service
                 self.semantic_service = create_semantic_analysis_service()
             except Exception as e:
                 raise ValueError(f"Failed to initialize semantic analysis service: {str(e)}")
@@ -99,7 +101,7 @@ class SemanticAnalysisNode(BaseProcessingNode):
                 'prep_timestamp': datetime.utcnow().isoformat()
             }
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute semantic analysis.
         
@@ -174,7 +176,7 @@ class SemanticAnalysisNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process semantic analysis results.
         
@@ -265,7 +267,7 @@ class VectorSearchNode(BaseProcessingNode):
         super().__init__("VectorSearchNode", max_retries, retry_delay)
         self.vector_engine = None
         
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for vector search operations.
         
@@ -288,6 +290,7 @@ class VectorSearchNode(BaseProcessingNode):
             
             # Initialize vector search engine
             try:
+                from ..utils.vector_search import create_vector_search_engine
                 self.vector_engine = create_vector_search_engine()
             except Exception as e:
                 raise ValueError(f"Failed to initialize vector search engine: {str(e)}")
@@ -319,7 +322,7 @@ class VectorSearchNode(BaseProcessingNode):
                 'prep_timestamp': datetime.utcnow().isoformat()
             }
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute vector search operations.
         
@@ -349,7 +352,7 @@ class VectorSearchNode(BaseProcessingNode):
                 raw_transcript = transcript_data['raw_transcript']
                 
                 # Convert to TranscriptSegment objects (simplified)
-                from ..services.semantic_analysis_service import TranscriptSegment
+                from ..utils.semantic_types import TranscriptSegment
                 segments = []
                 for seg_data in raw_transcript:
                     segment = TranscriptSegment(
@@ -371,15 +374,33 @@ class VectorSearchNode(BaseProcessingNode):
                 
                 # Get optimized timestamps if semantic clusters are available
                 optimized_timestamps = []
-                semantic_clusters = store.get('semantic_clusters', [])
-                if semantic_clusters:
+                semantic_clusters_data = store.get('semantic_clusters', [])
+                if semantic_clusters_data:
                     try:
-                        # Convert cluster data to objects (this would need proper implementation)
-                        optimized_timestamps = self.vector_engine.find_optimal_timestamps(
-                            semantic_clusters=semantic_clusters,
-                            target_count=5,
-                            diversity_weight=0.3
-                        )
+                        # Convert cluster dictionaries to SemanticCluster objects
+                        from ..utils.semantic_types import SemanticCluster, TranscriptSegment
+                        semantic_clusters = []
+                        for cluster_dict in semantic_clusters_data:
+                            if isinstance(cluster_dict, dict):
+                                # Create a minimal SemanticCluster object for vector search
+                                cluster = SemanticCluster(
+                                    cluster_id=cluster_dict.get('cluster_id', ''),
+                                    segments=[],  # Empty segments list for now - vector search will work with basic metadata
+                                    theme=cluster_dict.get('theme', ''),
+                                    importance_score=cluster_dict.get('importance_score', 0.5),
+                                    start_time=cluster_dict.get('start_time', 0.0),
+                                    end_time=cluster_dict.get('end_time', 0.0),
+                                    summary=cluster_dict.get('summary', ''),
+                                    keywords=cluster_dict.get('keywords', [])
+                                )
+                                semantic_clusters.append(cluster)
+                        
+                        if semantic_clusters:
+                            optimized_timestamps = self.vector_engine.find_optimal_timestamps(
+                                semantic_clusters=semantic_clusters,
+                                target_count=5,
+                                diversity_weight=0.3
+                            )
                     except Exception as e:
                         self.logger.warning(f"Timestamp optimization failed: {str(e)}")
                 
@@ -409,7 +430,7 @@ class VectorSearchNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process vector search results.
         
@@ -481,7 +502,7 @@ class EnhancedTimestampNode(BaseProcessingNode):
     def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
         super().__init__("EnhancedTimestampNode", max_retries, retry_delay)
         
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for enhanced timestamp generation.
         
@@ -533,7 +554,7 @@ class EnhancedTimestampNode(BaseProcessingNode):
                 'prep_timestamp': datetime.utcnow().isoformat()
             }
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute enhanced timestamp generation.
         
@@ -643,7 +664,7 @@ class EnhancedTimestampNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process enhanced timestamp results.
         
@@ -704,7 +725,7 @@ class EnhancedTimestampNode(BaseProcessingNode):
                 'post_timestamp': datetime.utcnow().isoformat()
             }
     
-    def _determine_timestamp_methods(self, store: Store) -> List[str]:
+    def _determine_timestamp_methods(self, store: Dict[str, Any]) -> List[str]:
         """Determine which timestamp generation methods are available."""
         methods = []
         
@@ -730,8 +751,20 @@ class EnhancedTimestampNode(BaseProcessingNode):
         
         for ts in timestamps:
             # Handle different timestamp formats
-            if hasattr(ts, 'timestamp_seconds'):
-                # SemanticTimestamp object
+            if hasattr(ts, 'timestamp'):
+                # New SemanticTimestamp object format
+                timestamp_seconds = ts.timestamp
+                timestamp_dict = {
+                    'timestamp_seconds': timestamp_seconds,
+                    'timestamp_formatted': ts.metadata.get('timestamp_formatted', '') if ts.metadata else '',
+                    'description': ts.description,
+                    'importance_rating': ts.metadata.get('importance_rating', 5) if ts.metadata else 5,
+                    'youtube_url': ts.metadata.get('youtube_url', '') if ts.metadata else '',
+                    'title': ts.title,
+                    'confidence_score': ts.confidence_score
+                }
+            elif hasattr(ts, 'timestamp_seconds'):
+                # Old SemanticTimestamp object format
                 timestamp_seconds = ts.timestamp_seconds
                 timestamp_dict = {
                     'timestamp_seconds': timestamp_seconds,

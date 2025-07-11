@@ -42,62 +42,8 @@ except ImportError:
         from database import db_manager, check_database_health, get_database_session
         from database.connection import get_database_session_dependency
     except ImportError:
-        # Create mock implementations for testing
-        class YouTubeSummarizerFlow:
-            def __init__(self, **kwargs):
-                self.video_service = kwargs.get('video_service', None)
-                self.node_instances = {}
-            def run(self, input_data):
-                return {'status': 'mock_success', 'data': {}}
-            def _initialize_configured_nodes(self):
-                pass
-        
-        class WorkflowError:
-            def __init__(self, **kwargs):
-                pass
-        
-        class MockSettings:
-            def __init__(self):
-                self.app_name = "YouTube Summarizer"
-                self.app_version = "1.0.0"
-                self.log_level = "info"
-        
-        settings = MockSettings()
-        
-        # Mock error handling classes
-        class ErrorMessageProvider:
-            @classmethod
-            def get_error_details(cls, error_code, **kwargs):
-                return None
-            @classmethod
-            def format_error_response(cls, error_details, **kwargs):
-                return {"error": "Mock error"}
-        
-        class ErrorCode:
-            INVALID_URL_FORMAT = "E1001"
-            INTERNAL_SERVER_ERROR = "E7001"
-        
-        def validate_youtube_url_detailed(url):
-            class MockResult:
-                is_valid = True
-                result_type = None
-                error_message = None
-            return MockResult()
-        
-        def get_youtube_error(msg, vid=""): return None
-        def get_llm_error(msg, prov=""): return None
-        def get_network_error(msg, url=""): return None
-        
-        # Mock database classes
-        class MockDBManager:
-            async def initialize(self): return True
-            async def health_check(self): return {"status": "mock"}
-            async def close(self): pass
-        
-        db_manager = MockDBManager()
-        
-        async def check_database_health(): return {"status": "mock"}
-        async def get_database_session(): yield None
+        # If we still get ImportError, there's a configuration issue
+        raise ImportError("Required modules not found. Please check your environment setup and ensure all dependencies are installed.")
 
 # Configure logging
 import os
@@ -236,6 +182,30 @@ except ImportError:
         app.include_router(status_enhanced_router)
     except ImportError:
         logger.warning("Could not import enhanced status router - enhanced status tracking endpoints will not be available")
+
+# Include notifications router
+try:
+    from .api.notifications import router as notifications_router
+    app.include_router(notifications_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.notifications import router as notifications_router
+        app.include_router(notifications_router)
+    except ImportError:
+        logger.warning("Could not import notifications router - notification endpoints will not be available")
+
+# Include realtime status router
+try:
+    from .api.realtime_status import router as realtime_status_router
+    app.include_router(realtime_status_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.realtime_status import router as realtime_status_router
+        app.include_router(realtime_status_router)
+    except ImportError:
+        logger.warning("Could not import realtime status router - realtime status endpoints will not be available")
 
 # Add CORS middleware
 app.add_middleware(

@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
 from enum import Enum
 
-from ..database.connection import get_database_session_dependency
+from ..database.connection import get_database_session_dependency, get_database_session
 from ..database.batch_models import BatchStatus, BatchItemStatus, BatchPriority
 from ..services.batch_service import (
     BatchService, get_batch_service, BatchServiceError,
@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 # Create FastAPI router
 router = APIRouter(prefix="/api/v1/batch", tags=["batch"])
+
+# Session wrapper utility
+async def get_batch_service_with_session():
+    """
+    Dependency function that returns BatchService with database session.
+    This avoids FastAPI dependency injection issues with Session types.
+    """
+    batch_service = get_batch_service()
+    # Session will be managed by BatchService internally
+    return batch_service
 
 
 # Pydantic enum models for API responses
@@ -73,7 +83,6 @@ class CreateBatchRequest(BaseModel):
         """Validate YouTube URLs."""
         if not v:
             raise ValueError("At least one URL is required")
-        
         validated_urls = []
         for i, url in enumerate(v):
             if not url or not url.strip():
@@ -85,11 +94,9 @@ class CreateBatchRequest(BaseModel):
                 raise ValueError(f"Invalid YouTube URL at index {i}: {validation_result.error_message}")
             
             validated_urls.append(url)
-        
         # Check for duplicates
         if len(validated_urls) != len(set(validated_urls)):
             raise ValueError("Duplicate URLs are not allowed")
-        
         return validated_urls
 
     @validator('webhook_url')
@@ -294,15 +301,12 @@ class ErrorResponse(BaseModel):
 @router.post("/batches", response_model=BatchResponse, status_code=status.HTTP_201_CREATED)
 async def create_batch(
     request: CreateBatchRequest,
-    batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
+    batch_service: BatchService = Depends(get_batch_service)
 ):
     """
     Create a new batch for processing multiple YouTube videos.
-    
     This endpoint creates a new batch with the specified URLs and configuration.
     The batch will be in PENDING status and can be started using the start endpoint.
-    
     **Features:**
     - Validates all YouTube URLs before creating the batch
     - Supports batch priorities for processing order
@@ -310,9 +314,6 @@ async def create_batch(
     - Comprehensive error handling and validation
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Create batch request
         batch_request = BatchCreateRequest(
             name=request.name,
@@ -322,10 +323,8 @@ async def create_batch(
             webhook_url=request.webhook_url,
             batch_metadata=request.batch_metadata
         )
-        
         # Create batch
         batch = batch_service.create_batch(batch_request)
-        
         # Convert to response model
         batch_response = BatchResponse(
             id=batch.id,
@@ -371,10 +370,8 @@ async def create_batch(
                 for item in batch.batch_items
             ]
         )
-        
         logger.info(f"Created batch {batch.batch_id} with {len(request.urls)} items")
         return batch_response
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error creating batch: {e}")
         raise HTTPException(
@@ -395,11 +392,9 @@ async def list_batches(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(20, ge=1, le=100, description="Number of items per page"),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     List batches with optional filtering and pagination.
-    
     **Features:**
     - Filter by batch status
     - Pagination support
@@ -407,24 +402,18 @@ async def list_batches(
     - Includes batch summary information
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Convert status filter
         status_filter = None
         if batch_status:
             status_filter = BatchStatus(batch_status.value)
-        
         # Calculate offset
         offset = (page - 1) * page_size
-        
         # Get batches
         batches = batch_service.list_batches(
             status=status_filter,
             limit=page_size,
             offset=offset
         )
-        
         # Get total count for pagination
         all_batches = batch_service.list_batches(
             status=status_filter,
@@ -432,7 +421,6 @@ async def list_batches(
             offset=0
         )
         total_count = len(all_batches)
-        
         # Convert to response models
         batch_responses = [
             BatchSummaryResponse(
@@ -456,11 +444,9 @@ async def list_batches(
             )
             for batch in batches
         ]
-        
         # Calculate pagination info
         has_next = offset + page_size < total_count
         has_previous = page > 1
-        
         return BatchListResponse(
             batches=batch_responses,
             total_count=total_count,
@@ -469,7 +455,6 @@ async def list_batches(
             has_next=has_next,
             has_previous=has_previous
         )
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error listing batches: {e}")
         raise HTTPException(
@@ -488,29 +473,22 @@ async def list_batches(
 async def get_batch(
     batch_id: str = Path(..., description="Batch identifier"),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Get detailed information about a specific batch.
-    
     **Returns:**
     - Complete batch information
     - All batch items with their current status
     - Processing progress and statistics
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Get batch
         batch = batch_service.get_batch(batch_id)
-        
         if not batch:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Batch {batch_id} not found"
             )
-        
         # Convert to response model
         batch_response = BatchResponse(
             id=batch.id,
@@ -556,9 +534,7 @@ async def get_batch(
                 for item in batch.batch_items
             ]
         )
-        
         return batch_response
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error getting batch: {e}")
         raise HTTPException(
@@ -577,29 +553,22 @@ async def get_batch(
 async def get_batch_progress(
     batch_id: str = Path(..., description="Batch identifier"),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Get batch progress information with completion estimates.
-    
     **Returns:**
     - Current processing progress
     - Estimated completion time
     - Item counts by status
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Get batch progress
         progress = batch_service.get_batch_progress(batch_id)
-        
         if not progress:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Batch {batch_id} not found"
             )
-        
         # Convert to response model
         return BatchProgressResponse(
             batch_id=progress.batch_id,
@@ -612,7 +581,6 @@ async def get_batch_progress(
             started_at=progress.started_at,
             estimated_completion=progress.estimated_completion
         )
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error getting batch progress: {e}")
         raise HTTPException(
@@ -632,11 +600,9 @@ async def start_batch(
     batch_id: str = Path(..., description="Batch identifier"),
     request: StartBatchRequest = StartBatchRequest(),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Start processing a batch.
-    
     **Features:**
     - Validates batch can be started
     - Sets batch status to PROCESSING
@@ -644,25 +610,19 @@ async def start_batch(
     - Returns success confirmation
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Start batch processing
         success = batch_service.start_batch_processing(batch_id)
-        
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to start batch {batch_id}"
             )
-        
         logger.info(f"Started batch processing for {batch_id}")
         return {
             "success": True,
             "message": f"Batch {batch_id} started successfully",
             "batch_id": batch_id
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error starting batch: {e}")
         raise HTTPException(
@@ -682,11 +642,9 @@ async def cancel_batch(
     batch_id: str = Path(..., description="Batch identifier"),
     request: CancelBatchRequest = CancelBatchRequest(),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Cancel a batch and all its pending items.
-    
     **Features:**
     - Cancels batch and all pending items
     - Records cancellation reason
@@ -694,18 +652,13 @@ async def cancel_batch(
     - Returns cancellation confirmation
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Cancel batch
         success = batch_service.cancel_batch(batch_id, request.reason)
-        
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to cancel batch {batch_id}"
             )
-        
         logger.info(f"Cancelled batch {batch_id}: {request.reason}")
         return {
             "success": True,
@@ -713,7 +666,6 @@ async def cancel_batch(
             "batch_id": batch_id,
             "reason": request.reason
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error cancelling batch: {e}")
         raise HTTPException(
@@ -734,11 +686,9 @@ async def retry_batch_item(
     item_id: int = Path(..., description="Batch item ID"),
     request: RetryBatchItemRequest = RetryBatchItemRequest(),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Retry a failed batch item.
-    
     **Features:**
     - Validates item can be retried
     - Resets item status to QUEUED
@@ -746,18 +696,13 @@ async def retry_batch_item(
     - Re-queues item for processing
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Retry batch item
         success = batch_service.retry_failed_batch_item(item_id)
-        
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to retry batch item {item_id}"
             )
-        
         logger.info(f"Retried batch item {item_id} in batch {batch_id}")
         return {
             "success": True,
@@ -765,7 +710,6 @@ async def retry_batch_item(
             "batch_id": batch_id,
             "item_id": item_id
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error retrying batch item: {e}")
         raise HTTPException(
@@ -785,11 +729,9 @@ async def get_next_queue_item(
     queue_name: str = Query("video_processing", description="Queue name"),
     worker_id: str = Query(..., description="Worker identifier"),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Get the next available queue item for processing.
-    
     **Features:**
     - Retrieves highest priority available item
     - Locks item for the requesting worker
@@ -797,18 +739,13 @@ async def get_next_queue_item(
     - Returns item with batch context
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Get next queue item
         queue_item = batch_service.get_next_queue_item(queue_name, worker_id)
-        
         if not queue_item:
             return {
                 "available": False,
                 "message": "No items available in queue"
             }
-        
         # Convert to response
         return {
             "available": True,
@@ -829,7 +766,6 @@ async def get_next_queue_item(
                 } if queue_item.batch_item else None
             }
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error getting queue item: {e}")
         raise HTTPException(
@@ -849,11 +785,9 @@ async def complete_batch_item(
     batch_item_id: int = Path(..., description="Batch item ID"),
     result: Dict[str, Any] = ...,
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Complete processing of a batch item.
-    
     **Features:**
     - Updates item status to COMPLETED or FAILED
     - Records processing results
@@ -861,9 +795,6 @@ async def complete_batch_item(
     - Removes item from processing queue
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Create result object
         batch_result = BatchItemResult(
             batch_item_id=batch_item_id,
@@ -873,16 +804,13 @@ async def complete_batch_item(
             processing_time_seconds=result.get('processing_time_seconds'),
             result_data=result.get('result_data')
         )
-        
         # Complete batch item
         success = batch_service.complete_batch_item(batch_item_id, batch_result)
-        
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to complete batch item {batch_item_id}"
             )
-        
         logger.info(f"Completed batch item {batch_item_id} with status {batch_result.status.value}")
         return {
             "success": True,
@@ -890,7 +818,6 @@ async def complete_batch_item(
             "batch_item_id": batch_item_id,
             "status": batch_result.status.value
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error completing batch item: {e}")
         raise HTTPException(
@@ -908,11 +835,9 @@ async def complete_batch_item(
 @router.get("/statistics", response_model=BatchStatisticsResponse)
 async def get_batch_statistics(
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Get batch processing statistics.
-    
     **Returns:**
     - Total batches and items counts
     - Status distribution
@@ -920,12 +845,8 @@ async def get_batch_statistics(
     - Performance metrics
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Get statistics
         stats = batch_service.get_batch_statistics()
-        
         return BatchStatisticsResponse(
             total_batches=stats["total_batches"],
             batch_status_counts=stats["batch_status_counts"],
@@ -933,7 +854,6 @@ async def get_batch_statistics(
             item_status_counts=stats["item_status_counts"],
             active_processing_sessions=stats["active_processing_sessions"]
         )
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error getting statistics: {e}")
         raise HTTPException(
@@ -952,11 +872,9 @@ async def get_batch_statistics(
 async def cleanup_stale_sessions(
     timeout_minutes: int = Query(30, ge=1, le=1440, description="Session timeout in minutes"),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Clean up stale processing sessions.
-    
     **Features:**
     - Removes sessions that haven't sent heartbeat
     - Updates related batch items to FAILED status
@@ -964,12 +882,8 @@ async def cleanup_stale_sessions(
     - Returns cleanup count
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Clean up stale sessions
         cleaned_count = batch_service.cleanup_stale_sessions(timeout_minutes)
-        
         logger.info(f"Cleaned up {cleaned_count} stale processing sessions")
         return {
             "success": True,
@@ -977,7 +891,6 @@ async def cleanup_stale_sessions(
             "cleaned_count": cleaned_count,
             "timeout_minutes": timeout_minutes
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error cleaning up sessions: {e}")
         raise HTTPException(
@@ -996,7 +909,6 @@ async def cleanup_stale_sessions(
 async def batch_health_check():
     """
     Health check endpoint for batch processing system.
-    
     **Returns:**
     - Service status
     - Component health
@@ -1020,11 +932,9 @@ async def create_processing_session(
     batch_item_id: int = Path(..., description="Batch item ID"),
     worker_id: str = Query(..., description="Worker identifier"),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Create a processing session for progress tracking.
-    
     **Features:**
     - Creates session for tracking progress
     - Associates with worker and batch item
@@ -1032,12 +942,8 @@ async def create_processing_session(
     - Returns session identifier
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Create processing session
         session = batch_service.create_processing_session(batch_item_id, worker_id)
-        
         return {
             "success": True,
             "session_id": session.session_id,
@@ -1045,7 +951,6 @@ async def create_processing_session(
             "worker_id": worker_id,
             "created_at": session.started_at
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error creating session: {e}")
         raise HTTPException(
@@ -1066,11 +971,9 @@ async def update_session_progress(
     progress: float = Query(..., ge=0, le=100, description="Progress percentage"),
     current_step: Optional[str] = Query(None, description="Current processing step"),
     batch_service: BatchService = Depends(get_batch_service),
-    db_session: Session = Depends(get_database_session_dependency)
 ):
     """
     Update processing session progress.
-    
     **Features:**
     - Updates progress percentage
     - Records current processing step
@@ -1078,18 +981,13 @@ async def update_session_progress(
     - Returns update confirmation
     """
     try:
-        # Update batch service with database session
-        batch_service._session = db_session
-        
         # Update session progress
         success = batch_service.update_processing_session(session_id, progress, current_step)
-        
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session {session_id} not found"
             )
-        
         return {
             "success": True,
             "session_id": session_id,
@@ -1097,7 +995,6 @@ async def update_session_progress(
             "current_step": current_step,
             "updated_at": datetime.utcnow()
         }
-        
     except BatchServiceError as e:
         logger.error(f"Batch service error updating session: {e}")
         raise HTTPException(

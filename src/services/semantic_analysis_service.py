@@ -20,71 +20,18 @@ except ImportError:
     HAS_NUMPY = False
     # We'll implement fallback methods without numpy
 
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+    # Will use fallback clustering methods
+
 from ..utils.smart_llm_client import SmartLLMClient, TaskRequirements, detect_task_requirements
-from ..utils.semantic_analyzer import SemanticAnalyzer, create_semantic_analyzer
-from ..utils.vector_search import VectorSearchEngine, create_vector_search_engine
+from ..utils.semantic_types import TranscriptSegment, SemanticCluster, SemanticTimestamp
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TranscriptSegment:
-    """Represents a single transcript segment with metadata."""
-    start_time: float
-    end_time: Optional[float]
-    text: str
-    duration: Optional[float] = None
-    speaker: Optional[str] = None
-    
-    @property
-    def word_count(self) -> int:
-        """Get word count of the segment."""
-        return len(self.text.split())
-    
-    @property
-    def char_count(self) -> int:
-        """Get character count of the segment."""
-        return len(self.text)
-
-
-@dataclass
-class SemanticCluster:
-    """Represents a semantically related group of transcript segments."""
-    cluster_id: str
-    segments: List[TranscriptSegment]
-    theme: str
-    importance_score: float
-    start_time: float
-    end_time: float
-    summary: str
-    keywords: List[str]
-    
-    @property
-    def duration(self) -> float:
-        """Get total duration of the cluster."""
-        return self.end_time - self.start_time
-    
-    @property
-    def word_count(self) -> int:
-        """Get total word count of the cluster."""
-        return sum(segment.word_count for segment in self.segments)
-
-
-@dataclass
-class SemanticTimestamp:
-    """Enhanced timestamp with semantic information."""
-    timestamp_seconds: float
-    timestamp_formatted: str
-    description: str
-    importance_rating: int
-    youtube_url: str
-    video_id: str
-    semantic_cluster_id: str
-    cluster_theme: str
-    context_before: str
-    context_after: str
-    semantic_keywords: List[str]
-    confidence_score: float
 
 
 class SemanticAnalysisService:
@@ -98,8 +45,8 @@ class SemanticAnalysisService:
     def __init__(
         self, 
         smart_llm_client: Optional[SmartLLMClient] = None, 
-        semantic_analyzer: Optional[SemanticAnalyzer] = None,
-        vector_search_engine: Optional[VectorSearchEngine] = None
+        semantic_analyzer: Optional[Any] = None,
+        vector_search_engine: Optional[Any] = None
     ):
         """
         Initialize the semantic analysis service.
@@ -111,8 +58,27 @@ class SemanticAnalysisService:
         """
         self.logger = logging.getLogger(__name__)
         self.smart_llm_client = smart_llm_client or SmartLLMClient()
-        self.semantic_analyzer = semantic_analyzer or create_semantic_analyzer()
-        self.vector_search_engine = vector_search_engine or create_vector_search_engine()
+        
+        # Lazy initialization to avoid circular imports
+        if semantic_analyzer is None:
+            try:
+                from ..utils.semantic_analyzer import create_semantic_analyzer
+                self.semantic_analyzer = create_semantic_analyzer()
+            except ImportError as e:
+                self.logger.warning(f"Could not initialize semantic analyzer: {e}")
+                self.semantic_analyzer = None
+        else:
+            self.semantic_analyzer = semantic_analyzer
+            
+        if vector_search_engine is None:
+            try:
+                from ..utils.vector_search import create_vector_search_engine
+                self.vector_search_engine = create_vector_search_engine()
+            except ImportError as e:
+                self.logger.warning(f"Could not initialize vector search engine: {e}")
+                self.vector_search_engine = None
+        else:
+            self.vector_search_engine = vector_search_engine
         
         # Configuration
         self.min_segment_length = 3  # Minimum words per segment
@@ -188,24 +154,24 @@ class SemanticAnalysisService:
                 return self._create_empty_result("No semantic clusters identified")
             
             # Step 3: Extract semantic keywords efficiently
-            all_keywords = self._extract_semantic_keywords_optimized(clusters)
+            all_keywords = self._extract_semantic_keywords(clusters)
             
             # Step 4: Generate enhanced timestamps with performance optimization
             if self.use_vector_optimization and self.vector_search_engine:
-                timestamps = self._generate_vector_optimized_timestamps_fast(
+                timestamps = self._generate_vector_optimized_timestamps(
                     clusters, 
                     video_id, 
                     target_timestamp_count
                 )
             else:
-                timestamps = self._generate_semantic_timestamps_fast(
+                timestamps = self._generate_semantic_timestamps(
                     clusters, 
                     video_id, 
                     target_timestamp_count
                 )
             
             # Step 5: Calculate semantic metrics efficiently
-            metrics = self._calculate_semantic_metrics_optimized(segments, clusters, timestamps)
+            metrics = self._calculate_semantic_metrics(segments, clusters, timestamps)
             
             # Step 6: Add vector search analysis if available (with optimization)
             if self.vector_search_engine and len(segments) <= self.max_segments_for_full_analysis:
@@ -609,24 +575,29 @@ Focus on identifying natural content boundaries and meaningful topic shifts."""
             importance_rating = max(1, min(10, int(cluster.importance_score * 10)))
             
             timestamp = SemanticTimestamp(
-                timestamp_seconds=timestamp_seconds,
-                timestamp_formatted=self._format_timestamp(timestamp_seconds),
+                timestamp=timestamp_seconds,
+                title=cluster.theme,
                 description=cluster.summary or f"Key moment: {cluster.theme}",
-                importance_rating=importance_rating,
-                youtube_url=youtube_url,
-                video_id=video_id,
+                confidence_score=confidence,
                 semantic_cluster_id=cluster.cluster_id,
-                cluster_theme=cluster.theme,
-                context_before=context_before,
-                context_after=context_after,
-                semantic_keywords=cluster.keywords,
-                confidence_score=confidence
+                keywords=cluster.keywords,
+                importance_score=cluster.importance_score,
+                content_type="main_point",
+                metadata={
+                    'timestamp_formatted': self._format_timestamp(timestamp_seconds),
+                    'importance_rating': importance_rating,
+                    'youtube_url': youtube_url,
+                    'video_id': video_id,
+                    'cluster_theme': cluster.theme,
+                    'context_before': context_before,
+                    'context_after': context_after
+                }
             )
             
             timestamps.append(timestamp)
         
         # Sort by timestamp
-        timestamps.sort(key=lambda x: x.timestamp_seconds)
+        timestamps.sort(key=lambda x: x.timestamp)
         
         return timestamps
     
@@ -938,8 +909,8 @@ Focus on identifying natural content boundaries and meaningful topic shifts."""
 # Factory function for easy instantiation
 def create_semantic_analysis_service(
     smart_llm_client: Optional[SmartLLMClient] = None,
-    semantic_analyzer: Optional[SemanticAnalyzer] = None,
-    vector_search_engine: Optional[VectorSearchEngine] = None
+    semantic_analyzer: Optional[Any] = None,
+    vector_search_engine: Optional[Any] = None
 ) -> SemanticAnalysisService:
     """
     Factory function to create a semantic analysis service.

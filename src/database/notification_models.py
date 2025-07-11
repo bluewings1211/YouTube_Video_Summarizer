@@ -118,7 +118,7 @@ class NotificationConfig(Base):
     last_triggered_at = Column(DateTime(timezone=True), nullable=True)
     trigger_count_today = Column(Integer, nullable=False, default=0)
     trigger_count_total = Column(Integer, nullable=False, default=0)
-    metadata = Column(JSON, nullable=True)
+    config_metadata = Column(JSON, nullable=True)
     
     # Relationships
     notifications = relationship("Notification", back_populates="config", cascade="all, delete-orphan")
@@ -278,7 +278,7 @@ class Notification(Base):
     config_id = Column(Integer, ForeignKey('notification_configs.id', ondelete='CASCADE'), nullable=False)
     event_type = Column(Enum(NotificationEvent), nullable=False)
     event_source = Column(String(255), nullable=True, index=True)  # video_id, batch_id, etc.
-    event_metadata = Column(JSON, nullable=True)
+    event_config_metadata = Column(JSON, nullable=True)
     status = Column(Enum(NotificationStatus), nullable=False, default=NotificationStatus.PENDING)
     priority = Column(Enum(NotificationPriority), nullable=False, default=NotificationPriority.NORMAL)
     target_address = Column(String(2000), nullable=False)
@@ -294,7 +294,7 @@ class Notification(Base):
     max_retries = Column(Integer, nullable=False, default=3)
     retry_schedule = Column(JSON, nullable=True)
     error_info = Column(Text, nullable=True)
-    delivery_metadata = Column(JSON, nullable=True)
+    delivery_config_metadata = Column(JSON, nullable=True)
     webhook_response = Column(JSON, nullable=True)
     external_id = Column(String(255), nullable=True, index=True)
     
@@ -527,7 +527,7 @@ class WebhookEndpoint(Base):
     success_count = Column(Integer, nullable=False, default=0)
     failure_count = Column(Integer, nullable=False, default=0)
     average_response_time_ms = Column(Float, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    config_metadata = Column(JSON, nullable=True)
     
     # Indexes
     __table_args__ = (

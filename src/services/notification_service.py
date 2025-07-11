@@ -27,7 +27,7 @@ from ..database.exceptions import (
     classify_database_error, is_recoverable_error, should_retry_operation
 )
 from ..database.transaction_manager import TransactionManager, managed_transaction
-from ..utils.error_messages import ErrorMessages
+from ..utils.error_messages import ErrorMessageProvider
 from ..utils.webhook_client import (
     WebhookClient, WebhookConfig, WebhookRequest, WebhookAuthType,
     WebhookStatus

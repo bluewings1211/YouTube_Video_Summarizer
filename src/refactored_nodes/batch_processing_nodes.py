@@ -11,13 +11,13 @@ from typing import Dict, Any, List, Optional, Union
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 
-from .validation_nodes import BaseProcessingNode, Store
+from .validation_nodes import BaseProcessingNode
 from ..services.batch_service import BatchService, BatchCreateRequest, BatchProgressInfo, BatchItemResult
 from ..services.queue_service import QueueService, QueueProcessingOptions, WorkerInfo, QueueWorkerStatus
 from ..database.batch_models import BatchStatus, BatchItemStatus, BatchPriority
 from ..database.connection import get_database_session
 from ..flow import YouTubeSummarizerFlow, WorkflowConfig
-from ..utils.youtube_utils import extract_video_id_from_url
+from ..utils.validators import extract_youtube_video_id as extract_video_id_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class BatchCreationNode(BaseProcessingNode):
         self.config = config or BatchProcessingConfig()
         self.batch_service = None
         
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for batch creation by validating input URLs and configuration.
         
@@ -135,7 +135,7 @@ class BatchCreationNode(BaseProcessingNode):
             
             return prep_result
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute batch creation in the database.
         
@@ -204,7 +204,7 @@ class BatchCreationNode(BaseProcessingNode):
             
             return exec_result
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process batch creation and update store.
         
@@ -299,7 +299,7 @@ class BatchProcessingNode(BaseProcessingNode):
         self.queue_service = None
         self.workers = []
         
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for batch processing by validating batch existence and configuration.
         
@@ -365,7 +365,7 @@ class BatchProcessingNode(BaseProcessingNode):
             
             return prep_result
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute batch processing using queue workers.
         
@@ -436,7 +436,7 @@ class BatchProcessingNode(BaseProcessingNode):
             
             return exec_result
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process batch processing results and update store.
         
@@ -684,7 +684,7 @@ class BatchStatusNode(BaseProcessingNode):
         self.config = config or BatchProcessingConfig()
         self.batch_service = None
         
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for batch status monitoring.
         
@@ -729,7 +729,7 @@ class BatchStatusNode(BaseProcessingNode):
             
             return prep_result
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute batch status monitoring and reporting.
         
@@ -808,7 +808,7 @@ class BatchStatusNode(BaseProcessingNode):
             
             return exec_result
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process batch status monitoring results and update store.
         

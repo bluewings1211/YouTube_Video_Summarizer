@@ -268,6 +268,50 @@ class WorkflowConfig:
         
         return False
 
+    def get_execution_order(self) -> List[str]:
+        """Get the execution order of enabled nodes based on dependencies."""
+        enabled_nodes = {name: config for name, config in self.node_configs.items() if config.enabled}
+        
+        # If no nodes are enabled, return default order
+        if not enabled_nodes:
+            return ['YouTubeDataNode', 'SummarizationNode', 'EnhancedTimestampNode', 'KeywordExtractionNode']
+        
+        # Simple topological sort for dependency resolution
+        ordered_nodes = []
+        remaining_nodes = set(enabled_nodes.keys())
+        
+        while remaining_nodes:
+            # Find nodes with no unresolved dependencies
+            ready_nodes = []
+            for node_name in remaining_nodes:
+                config = enabled_nodes[node_name]
+                unresolved_deps = [dep for dep in config.dependencies if dep in remaining_nodes]
+                if not unresolved_deps:
+                    ready_nodes.append(node_name)
+            
+            if not ready_nodes:
+                # If no nodes are ready, we have a circular dependency
+                # Add remaining nodes in default order to break the cycle
+                ready_nodes = list(remaining_nodes)
+            
+            # Sort ready nodes by priority (YouTubeDataNode first, etc.)
+            priority_order = ['YouTubeDataNode', 'SummarizationNode', 'SemanticAnalysisNode', 
+                            'VectorSearchNode', 'EnhancedTimestampNode', 'KeywordExtractionNode', 'TimestampNode']
+            
+            ready_nodes.sort(key=lambda x: priority_order.index(x) if x in priority_order else len(priority_order))
+            
+            # Add the first ready node to execution order
+            if ready_nodes:
+                node_to_add = ready_nodes[0]
+                ordered_nodes.append(node_to_add)
+                remaining_nodes.remove(node_to_add)
+        
+        return ordered_nodes
+
+    def get_node_config(self, node_name: str) -> Optional[NodeConfig]:
+        """Get configuration for a specific node."""
+        return self.node_configs.get(node_name)
+
 
 def create_default_workflow_config() -> WorkflowConfig:
     """Create a default workflow configuration with sensible defaults."""

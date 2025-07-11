@@ -24,7 +24,7 @@ try:
 except ImportError:
     HAS_EMBEDDING_SUPPORT = False
 
-from ..services.semantic_analysis_service import TranscriptSegment, SemanticCluster, SemanticTimestamp
+from .semantic_types import TranscriptSegment, SemanticCluster, SemanticTimestamp
 
 logger = logging.getLogger(__name__)
 
@@ -266,9 +266,10 @@ class VectorSearchEngine:
             cluster_map = {}
             
             for cluster in semantic_clusters:
-                for segment in cluster.segments:
-                    all_segments.append(segment)
-                    cluster_map[len(all_segments) - 1] = cluster
+                if cluster.segments:  # Only process clusters with segments
+                    for segment in cluster.segments:
+                        all_segments.append(segment)
+                        cluster_map[len(all_segments) - 1] = cluster
             
             if not all_segments:
                 return []
@@ -304,7 +305,7 @@ class VectorSearchEngine:
                 timestamps.append(timestamp)
             
             # Sort by start time
-            timestamps.sort(key=lambda x: x.timestamp_seconds)
+            timestamps.sort(key=lambda x: x.timestamp)
             
             return timestamps
             
@@ -532,18 +533,23 @@ class VectorSearchEngine:
         context_before, context_after = self._get_segment_context(segment, cluster)
         
         return SemanticTimestamp(
-            timestamp_seconds=segment.start_time,
-            timestamp_formatted=timestamp_formatted,
+            timestamp=segment.start_time,
+            title=cluster.theme,
             description=description,
-            importance_rating=max(1, min(10, int(cluster.importance_score * 10))),
-            youtube_url=youtube_url,
-            video_id=video_id,
+            confidence_score=confidence,
             semantic_cluster_id=cluster.cluster_id,
-            cluster_theme=cluster.theme,
-            context_before=context_before,
-            context_after=context_after,
-            semantic_keywords=cluster.keywords,
-            confidence_score=confidence
+            keywords=cluster.keywords,
+            importance_score=cluster.importance_score,
+            content_type="main_point",
+            metadata={
+                'timestamp_formatted': timestamp_formatted,
+                'importance_rating': max(1, min(10, int(cluster.importance_score * 10))),
+                'youtube_url': youtube_url,
+                'video_id': video_id,
+                'cluster_theme': cluster.theme,
+                'context_before': context_before,
+                'context_after': context_after
+            }
         )
     
     def _calculate_embedding_confidence(self, embedding: Any, cluster: SemanticCluster) -> float:
