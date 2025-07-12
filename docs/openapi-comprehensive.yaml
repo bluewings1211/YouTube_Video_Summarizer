@@ -1,0 +1,1676 @@
+openapi: 3.0.0
+info:
+  title: YouTube Summarizer API
+  description: |
+    Comprehensive AI-powered YouTube video summarization service with advanced features including:
+    - Video transcript extraction and AI-powered summarization
+    - Timestamped segment analysis with importance ratings
+    - Keyword extraction and content analysis
+    - Batch processing for multiple videos
+    - Real-time status monitoring and WebSocket support
+    - Advanced notification system with webhooks
+    - Complete video processing history management
+    - Semantic analysis and embedding technologies
+  version: 1.3.0
+  contact:
+    name: API Support
+    url: https://github.com/your-org/youtube-summarizer
+    email: support@your-domain.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8000
+    description: Development server
+  - url: https://your-domain.com
+    description: Production server
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  # Core Summarization API
+  /api/v1/summarize:
+    post:
+      summary: Summarize YouTube Video
+      description: |
+        Extract transcript, generate summary, timestamps, and keywords from a YouTube video.
+        
+        This endpoint accepts a YouTube URL and returns:
+        - Video metadata (title, duration, video ID)
+        - AI-generated summary (max 500 words)
+        - Timestamped segments with importance ratings
+        - Extracted keywords (5-8 items)
+        - Processing performance metrics
+        
+        The service supports public videos with available transcripts in English and Chinese.
+      operationId: summarizeVideo
+      tags:
+        - Summarization
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        description: YouTube video URL to summarize
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SummarizeRequest'
+            examples:
+              basic_video:
+                summary: Basic video summarization
+                value:
+                  youtube_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+              with_reprocess:
+                summary: Video with reprocessing policy
+                value:
+                  youtube_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                  reprocess_policy: "if_failed"
+      responses:
+        '200':
+          description: Successful summarization
+          headers:
+            X-Process-Time:
+              $ref: '#/components/headers/X-Process-Time'
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SummarizeResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Unprocessable Entity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Health and Monitoring
+  /health:
+    get:
+      summary: Health Check
+      description: Check the health status of the API service and its components
+      operationId: healthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /health/database:
+    get:
+      summary: Database Health Check
+      description: Detailed database health check endpoint
+      operationId: databaseHealthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Database health information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseHealthResponse'
+
+  /metrics:
+    get:
+      summary: Get Application Metrics
+      description: Get application metrics for monitoring and observability
+      operationId: getMetrics
+      tags:
+        - Monitoring
+      responses:
+        '200':
+          description: Application metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+
+  /:
+    get:
+      summary: API Root Information
+      description: Get basic API information and available endpoints
+      operationId: rootInfo
+      tags:
+        - Root
+      responses:
+        '200':
+          description: API information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RootResponse'
+
+  # History Management API
+  /api/v1/history/videos:
+    get:
+      summary: List Processed Videos
+      description: Retrieve paginated list of processed videos with advanced filtering
+      operationId: listVideos
+      tags:
+        - History
+      parameters:
+        - name: page
+          in: query
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: page_size
+          in: query
+          description: Items per page
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 100
+        - name: sort_by
+          in: query
+          description: Sort field
+          schema:
+            type: string
+            enum: [created_at, title, duration, status]
+            default: created_at
+        - name: sort_order
+          in: query
+          description: Sort direction
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: date_from
+          in: query
+          description: Filter by date range start
+          schema:
+            type: string
+            format: date-time
+        - name: date_to
+          in: query
+          description: Filter by date range end
+          schema:
+            type: string
+            format: date-time
+        - name: keywords
+          in: query
+          description: Filter by keywords (comma-separated)
+          schema:
+            type: string
+        - name: title_search
+          in: query
+          description: Search in video titles
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of videos with pagination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoListResponse'
+
+  /api/v1/history/videos/{video_id}:
+    get:
+      summary: Get Video Details
+      description: Get detailed information for a specific video
+      operationId: getVideoDetails
+      tags:
+        - History
+      parameters:
+        - name: video_id
+          in: path
+          required: true
+          description: Video ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Video details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoDetailResponse'
+        '404':
+          description: Video not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Delete Video
+      description: Delete a video with cascading deletion of related records
+      operationId: deleteVideo
+      tags:
+        - History
+      parameters:
+        - name: video_id
+          in: path
+          required: true
+          description: Video ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteVideoRequest'
+      responses:
+        '200':
+          description: Video deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CascadeDeleteResultResponse'
+
+  /api/v1/history/videos/{video_id}/reprocess:
+    post:
+      summary: Reprocess Video
+      description: Initiate reprocessing of a video with configurable options
+      operationId: reprocessVideo
+      tags:
+        - History
+      parameters:
+        - name: video_id
+          in: path
+          required: true
+          description: Video ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReprocessingRequest'
+      responses:
+        '200':
+          description: Reprocessing initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReprocessingResponse'
+
+  /api/v1/history/statistics:
+    get:
+      summary: Video Processing Statistics
+      description: Get comprehensive statistics about video processing
+      operationId: getVideoStatistics
+      tags:
+        - History
+      responses:
+        '200':
+          description: Video processing statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoStatisticsResponse'
+
+  # Batch Processing API
+  /api/v1/batch/batches:
+    post:
+      summary: Create Batch
+      description: Create a new batch processing job for multiple videos
+      operationId: createBatch
+      tags:
+        - Batch Processing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBatchRequest'
+      responses:
+        '201':
+          description: Batch created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResponse'
+    get:
+      summary: List Batches
+      description: List batches with filtering and pagination
+      operationId: listBatches
+      tags:
+        - Batch Processing
+      parameters:
+        - name: batch_status
+          in: query
+          description: Filter by batch status
+          schema:
+            type: string
+            enum: [created, processing, completed, failed, cancelled]
+        - name: page
+          in: query
+          description: Page number
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          description: Items per page
+          schema:
+            type: integer
+            default: 10
+            maximum: 100
+      responses:
+        '200':
+          description: List of batches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchListResponse'
+
+  /api/v1/batch/batches/{batch_id}:
+    get:
+      summary: Get Batch Details
+      description: Get detailed information about a specific batch
+      operationId: getBatchDetails
+      tags:
+        - Batch Processing
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          description: Batch ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Batch details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchDetailResponse'
+
+  /api/v1/batch/batches/{batch_id}/start:
+    post:
+      summary: Start Batch Processing
+      description: Start processing a batch
+      operationId: startBatch
+      tags:
+        - Batch Processing
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          description: Batch ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartBatchRequest'
+      responses:
+        '200':
+          description: Batch started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchOperationResponse'
+
+  /api/v1/batch/batches/{batch_id}/cancel:
+    post:
+      summary: Cancel Batch
+      description: Cancel a batch that is queued or currently processing
+      operationId: cancelBatch
+      tags:
+        - Batch Processing
+      parameters:
+        - name: batch_id
+          in: path
+          required: true
+          description: Batch ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelBatchRequest'
+      responses:
+        '200':
+          description: Batch cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchOperationResponse'
+
+  /api/v1/batch/statistics:
+    get:
+      summary: Batch Processing Statistics
+      description: Get comprehensive batch processing statistics
+      operationId: getBatchStatistics
+      tags:
+        - Batch Processing
+      responses:
+        '200':
+          description: Batch processing statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchStatisticsResponse'
+
+  # Status Tracking API
+  /api/status:
+    get:
+      summary: List Processing Statuses
+      description: List processing statuses with pagination and filtering
+      operationId: listStatuses
+      tags:
+        - Status Tracking
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: status_filter
+          in: query
+          schema:
+            type: string
+        - name: worker_id
+          in: query
+          schema:
+            type: string
+        - name: active_only
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: List of statuses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusListResponse'
+
+  /api/status/{status_id}:
+    get:
+      summary: Get Status Details
+      description: Get detailed status information by status ID
+      operationId: getStatusDetails
+      tags:
+        - Status Tracking
+      parameters:
+        - name: status_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Status details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusDetailResponse'
+    put:
+      summary: Update Status
+      description: Update processing status with progress information
+      operationId: updateStatus
+      tags:
+        - Status Tracking
+      parameters:
+        - name: status_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusUpdateRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusUpdateResponse'
+
+  /api/status/{status_id}/heartbeat:
+    post:
+      summary: Update Heartbeat
+      description: Update heartbeat to indicate worker is still active
+      operationId: updateHeartbeat
+      tags:
+        - Status Tracking
+      parameters:
+        - name: status_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Heartbeat updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatResponse'
+
+  /api/status/metrics/summary:
+    get:
+      summary: Get Performance Summary
+      description: Get performance summary across all processing operations
+      operationId: getPerformanceSummary
+      tags:
+        - Status Tracking
+      responses:
+        '200':
+          description: Performance metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceSummaryResponse'
+
+  # Notifications API
+  /api/v1/notifications/configs:
+    post:
+      summary: Create Notification Configuration
+      description: Create a new notification configuration
+      operationId: createNotificationConfig
+      tags:
+        - Notifications
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotificationConfigRequest'
+      responses:
+        '201':
+          description: Configuration created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationConfigResponse'
+    get:
+      summary: List Notification Configurations
+      description: List notification configurations with filtering
+      operationId: listNotificationConfigs
+      tags:
+        - Notifications
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [webhook, email, slack, discord]
+        - name: is_active
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: List of configurations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationConfigListResponse'
+
+  /api/v1/notifications/trigger:
+    post:
+      summary: Trigger Notification
+      description: Manually trigger notifications for specific events
+      operationId: triggerNotification
+      tags:
+        - Notifications
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TriggerNotificationRequest'
+      responses:
+        '200':
+          description: Notification triggered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationTriggerResponse'
+
+  /api/v1/notifications/stats:
+    get:
+      summary: Get Notification Statistics
+      description: Get comprehensive notification statistics
+      operationId: getNotificationStats
+      tags:
+        - Notifications
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Notification statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationStatsResponse'
+
+  # Real-time API
+  /api/realtime/connections/stats:
+    get:
+      summary: WebSocket Connection Statistics
+      description: Get WebSocket connection statistics
+      operationId: getConnectionStats
+      tags:
+        - Real-time
+      responses:
+        '200':
+          description: Connection statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionStatsResponse'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: "Use 'Bearer your_api_key_here'"
+
+  schemas:
+    # Core request/response models
+    SummarizeRequest:
+      type: object
+      required:
+        - youtube_url
+      properties:
+        youtube_url:
+          type: string
+          format: uri
+          description: YouTube video URL to summarize
+          example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+          pattern: '^https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/|m\.youtube\.com/watch\?v=)[a-zA-Z0-9_-]{11}'
+        reprocess_policy:
+          type: string
+          description: Policy for handling duplicate videos
+          enum: [never, always, if_failed]
+          default: never
+
+    SummarizeResponse:
+      type: object
+      required:
+        - video_id
+        - title
+        - duration
+        - summary
+        - timestamped_segments
+        - keywords
+        - processing_time
+      properties:
+        video_id:
+          type: string
+          description: YouTube video ID
+          example: "dQw4w9WgXcQ"
+        title:
+          type: string
+          description: Video title
+          example: "Rick Astley - Never Gonna Give You Up (Official Music Video)"
+        duration:
+          type: integer
+          description: Video duration in seconds
+          example: 213
+        summary:
+          type: string
+          description: AI-generated summary (max 500 words)
+          example: "This music video features Rick Astley performing his iconic hit song..."
+        timestamped_segments:
+          type: array
+          description: List of important timestamped segments
+          items:
+            $ref: '#/components/schemas/TimestampedSegment'
+        keywords:
+          type: array
+          description: Extracted keywords (5-8 items)
+          items:
+            type: string
+          example: ["Rick Astley", "Never Gonna Give You Up", "80s music", "pop music", "music video"]
+        processing_time:
+          type: number
+          format: float
+          description: Processing time in seconds
+          example: 3.24
+
+    TimestampedSegment:
+      type: object
+      required:
+        - timestamp
+        - url
+        - description
+        - importance_rating
+      properties:
+        timestamp:
+          type: string
+          description: Timestamp in HH:MM:SS or MM:SS format
+          example: "01:30"
+          pattern: '^([0-9]{1,2}:)?[0-9]{1,2}:[0-9]{2}$'
+        url:
+          type: string
+          format: uri
+          description: YouTube URL with timestamp parameter
+          example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=90s"
+        description:
+          type: string
+          description: Brief description of the segment content
+          example: "Introduction to key concept"
+        importance_rating:
+          type: integer
+          description: Importance rating from 1-10
+          minimum: 1
+          maximum: 10
+          example: 8
+
+    # Error handling
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - category
+            - severity
+            - title
+            - message
+            - suggested_actions
+            - is_recoverable
+            - timestamp
+          properties:
+            code:
+              type: string
+              description: Error code
+              example: "E1001"
+            category:
+              type: string
+              description: Error category
+              enum: [validation, content, llm, network, system, rate_limit]
+              example: "validation"
+            severity:
+              type: string
+              description: Error severity level
+              enum: [low, medium, high, critical]
+              example: "medium"
+            title:
+              type: string
+              description: Error title
+              example: "Invalid YouTube URL Format"
+            message:
+              type: string
+              description: User-friendly error message
+              example: "Please provide a valid YouTube video URL"
+            suggested_actions:
+              type: array
+              description: Suggested actions to resolve the error
+              items:
+                type: string
+              example: ["Check URL format", "Try again"]
+            is_recoverable:
+              type: boolean
+              description: Whether the error is recoverable
+              example: true
+            timestamp:
+              type: string
+              format: date-time
+              description: Error timestamp
+              example: "2024-01-15T10:30:00Z"
+
+    # Health and monitoring
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - timestamp
+        - version
+        - components
+      properties:
+        status:
+          type: string
+          description: Overall service health status
+          enum: [healthy, degraded, unhealthy]
+          example: "healthy"
+        timestamp:
+          type: string
+          format: date-time
+          description: Current timestamp
+          example: "2024-01-15T10:30:00Z"
+        version:
+          type: string
+          description: API version
+          example: "1.3.0"
+        components:
+          type: object
+          properties:
+            workflow:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [healthy, unhealthy]
+                ready:
+                  type: boolean
+            database:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [healthy, unhealthy]
+                response_time_ms:
+                  type: number
+                pool_status:
+                  type: string
+
+    DatabaseHealthResponse:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        database:
+          type: object
+          properties:
+            status:
+              type: string
+            connection_pool:
+              type: object
+            query_performance:
+              type: object
+
+    MetricsResponse:
+      type: object
+      required:
+        - uptime_seconds
+        - timestamp
+        - version
+        - workflow_status
+      properties:
+        uptime_seconds:
+          type: number
+          description: Service uptime in seconds
+          example: 3600
+        timestamp:
+          type: string
+          format: date-time
+          description: Current timestamp
+          example: "2024-01-15T10:30:00Z"
+        version:
+          type: string
+          description: API version
+          example: "1.3.0"
+        workflow_status:
+          type: object
+          description: Workflow engine status
+          properties:
+            initialized:
+              type: boolean
+              description: Whether workflow is initialized
+              example: true
+            ready:
+              type: boolean
+              description: Whether workflow is ready
+              example: true
+
+    RootResponse:
+      type: object
+      required:
+        - service
+        - version
+        - description
+        - endpoints
+        - timestamp
+      properties:
+        service:
+          type: string
+          description: Service name
+          example: "YouTube Summarizer"
+        version:
+          type: string
+          description: API version
+          example: "1.3.0"
+        description:
+          type: string
+          description: Service description
+          example: "AI-powered YouTube video summarization service"
+        endpoints:
+          type: object
+          description: Available endpoints
+          additionalProperties:
+            type: string
+        timestamp:
+          type: string
+          format: date-time
+          description: Current timestamp
+          example: "2024-01-15T10:30:00Z"
+
+    # History API models
+    VideoListResponse:
+      type: object
+      required:
+        - videos
+        - pagination
+      properties:
+        videos:
+          type: array
+          items:
+            $ref: '#/components/schemas/VideoSummary'
+        pagination:
+          $ref: '#/components/schemas/PaginationInfo'
+
+    VideoSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        youtube_id:
+          type: string
+        title:
+          type: string
+        duration:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        summary_word_count:
+          type: integer
+
+    VideoDetailResponse:
+      type: object
+      required:
+        - video
+      properties:
+        video:
+          $ref: '#/components/schemas/VideoDetail'
+
+    VideoDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        youtube_id:
+          type: string
+        title:
+          type: string
+        duration:
+          type: integer
+        transcript:
+          type: string
+        summary:
+          type: string
+        keywords:
+          type: array
+          items:
+            type: string
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimestampedSegment'
+        processing_metadata:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DeleteVideoRequest:
+      type: object
+      properties:
+        force:
+          type: boolean
+          default: false
+        audit_user:
+          type: string
+
+    CascadeDeleteResultResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        deleted_records:
+          type: object
+        processing_time:
+          type: number
+        audit_log:
+          type: string
+
+    ReprocessingRequest:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [full, summary_only, keywords_only, segments_only]
+          default: full
+        force:
+          type: boolean
+          default: false
+        clear_cache:
+          type: boolean
+          default: true
+        preserve_metadata:
+          type: boolean
+          default: false
+
+    ReprocessingResponse:
+      type: object
+      properties:
+        reprocessing_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        estimated_time:
+          type: integer
+        mode:
+          type: string
+        message:
+          type: string
+
+    VideoStatisticsResponse:
+      type: object
+      properties:
+        total_videos:
+          type: integer
+        completed_videos:
+          type: integer
+        failed_videos:
+          type: integer
+        processing_videos:
+          type: integer
+        completion_rate:
+          type: number
+        average_processing_time:
+          type: number
+        status_distribution:
+          type: object
+
+    # Batch processing models
+    CreateBatchRequest:
+      type: object
+      required:
+        - name
+        - urls
+      properties:
+        name:
+          type: string
+          description: Batch name
+        description:
+          type: string
+          description: Batch description
+        urls:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: List of YouTube URLs to process
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+          default: medium
+        webhook_url:
+          type: string
+          format: uri
+          description: Webhook URL for notifications
+        processing_options:
+          type: object
+          properties:
+            reprocess_policy:
+              type: string
+              enum: [never, always, if_failed]
+            enable_notifications:
+              type: boolean
+
+    BatchResponse:
+      type: object
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [created, processing, completed, failed, cancelled]
+        total_items:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        estimated_processing_time:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchItem'
+
+    BatchItem:
+      type: object
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        youtube_url:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, completed, failed, cancelled]
+        position:
+          type: integer
+        video_id:
+          type: string
+        processing_time:
+          type: number
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    BatchListResponse:
+      type: object
+      properties:
+        batches:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchSummary'
+        pagination:
+          $ref: '#/components/schemas/PaginationInfo'
+
+    BatchSummary:
+      type: object
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+        total_items:
+          type: integer
+        completed_items:
+          type: integer
+        failed_items:
+          type: integer
+        progress_percentage:
+          type: number
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+
+    BatchDetailResponse:
+      type: object
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+        priority:
+          type: string
+        total_items:
+          type: integer
+        completed_items:
+          type: integer
+        failed_items:
+          type: integer
+        progress_percentage:
+          type: number
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        estimated_completion:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchItem'
+
+    StartBatchRequest:
+      type: object
+      properties:
+        force:
+          type: boolean
+          default: false
+
+    CancelBatchRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+
+    BatchOperationResponse:
+      type: object
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        message:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    BatchStatisticsResponse:
+      type: object
+      properties:
+        total_batches:
+          type: integer
+        active_batches:
+          type: integer
+        completed_batches:
+          type: integer
+        failed_batches:
+          type: integer
+        total_items_processed:
+          type: integer
+        average_batch_size:
+          type: number
+        average_processing_time:
+          type: number
+        success_rate:
+          type: number
+        queue_statistics:
+          type: object
+
+    # Status tracking models
+    StatusListResponse:
+      type: object
+      properties:
+        statuses:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatusSummary'
+        pagination:
+          $ref: '#/components/schemas/PaginationInfo'
+
+    StatusSummary:
+      type: object
+      properties:
+        status_id:
+          type: string
+          format: uuid
+        video_id:
+          type: string
+          format: uuid
+        batch_item_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, queued, processing, completed, failed, cancelled]
+        progress_percentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+        current_step:
+          type: string
+        worker_id:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        last_heartbeat:
+          type: string
+          format: date-time
+
+    StatusDetailResponse:
+      type: object
+      properties:
+        status_id:
+          type: string
+          format: uuid
+        video_id:
+          type: string
+          format: uuid
+        batch_item_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        progress_percentage:
+          type: integer
+        current_step:
+          type: string
+        worker_id:
+          type: string
+        estimated_remaining_time:
+          type: integer
+        metadata:
+          type: object
+        error_info:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_heartbeat:
+          type: string
+          format: date-time
+
+    StatusUpdateRequest:
+      type: object
+      properties:
+        new_status:
+          type: string
+          enum: [pending, queued, processing, completed, failed, cancelled]
+        progress_percentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+        current_step:
+          type: string
+        estimated_remaining_time:
+          type: integer
+        metadata:
+          type: object
+
+    StatusUpdateResponse:
+      type: object
+      properties:
+        status_id:
+          type: string
+          format: uuid
+        updated:
+          type: boolean
+        timestamp:
+          type: string
+          format: date-time
+
+    HeartbeatResponse:
+      type: object
+      properties:
+        status_id:
+          type: string
+          format: uuid
+        heartbeat_updated:
+          type: boolean
+        last_heartbeat:
+          type: string
+          format: date-time
+
+    PerformanceSummaryResponse:
+      type: object
+      properties:
+        total_processed:
+          type: integer
+        average_processing_time:
+          type: number
+        success_rate:
+          type: number
+        current_active:
+          type: integer
+        processing_rate_per_hour:
+          type: number
+        status_distribution:
+          type: object
+
+    # Notification models
+    CreateNotificationConfigRequest:
+      type: object
+      required:
+        - name
+        - type
+        - events
+        - target_address
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [webhook, email, slack, discord]
+        events:
+          type: array
+          items:
+            type: string
+        target_address:
+          type: string
+        is_active:
+          type: boolean
+          default: true
+        rate_limit:
+          type: object
+        retry_config:
+          type: object
+        filter_conditions:
+          type: object
+
+    NotificationConfigResponse:
+      type: object
+      properties:
+        config_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+        events:
+          type: array
+          items:
+            type: string
+        target_address:
+          type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    NotificationConfigListResponse:
+      type: object
+      properties:
+        configs:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationConfigResponse'
+        pagination:
+          $ref: '#/components/schemas/PaginationInfo'
+
+    TriggerNotificationRequest:
+      type: object
+      required:
+        - event_type
+      properties:
+        event_type:
+          type: string
+        metadata:
+          type: object
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+        target_configs:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    NotificationTriggerResponse:
+      type: object
+      properties:
+        triggered:
+          type: boolean
+        notifications_sent:
+          type: integer
+        message:
+          type: string
+
+    NotificationStatsResponse:
+      type: object
+      properties:
+        total_sent:
+          type: integer
+        total_failed:
+          type: integer
+        success_rate:
+          type: number
+        average_delivery_time:
+          type: number
+        by_type:
+          type: object
+        by_event:
+          type: object
+        rate_limiting:
+          type: object
+
+    # Real-time models
+    ConnectionStatsResponse:
+      type: object
+      properties:
+        total_connections:
+          type: integer
+        active_subscriptions:
+          type: integer
+        average_connection_time:
+          type: number
+        message_throughput:
+          type: object
+
+    # Common models
+    PaginationInfo:
+      type: object
+      required:
+        - page
+        - page_size
+        - total_count
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total_count:
+          type: integer
+          minimum: 0
+        total_pages:
+          type: integer
+          minimum: 0
+        has_next:
+          type: boolean
+        has_previous:
+          type: boolean
+
+  headers:
+    X-Process-Time:
+      description: Processing time in seconds
+      schema:
+        type: string
+        example: "3.240"
+    X-Request-ID:
+      description: Unique request identifier
+      schema:
+        type: string
+        example: "req_1642234200000"
+    X-RateLimit-Limit:
+      description: Rate limit for the current window
+      schema:
+        type: integer
+        example: 100
+    X-RateLimit-Remaining:
+      description: Remaining requests in current window
+      schema:
+        type: integer
+        example: 95
+    X-RateLimit-Reset:
+      description: Time when rate limit window resets (Unix timestamp)
+      schema:
+        type: integer
+        example: 1642234800
+
+tags:
+  - name: Summarization
+    description: Video summarization operations
+  - name: History
+    description: Video processing history management
+  - name: Batch Processing
+    description: Batch processing operations for multiple videos
+  - name: Status Tracking
+    description: Real-time status monitoring and tracking
+  - name: Notifications
+    description: Event-driven notification system
+  - name: Real-time
+    description: WebSocket-based real-time monitoring
+  - name: Health
+    description: Service health and status monitoring
+  - name: Monitoring
+    description: Application monitoring and metrics
+  - name: Root
+    description: API information and discovery
+
+externalDocs:
+  description: Complete API Documentation
+  url: https://github.com/your-org/youtube-summarizer/docs/api-documentation-comprehensive.md
