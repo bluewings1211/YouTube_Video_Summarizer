@@ -134,13 +134,43 @@ class WorkflowConfig:
             ),
             'TimestampNode': NodeConfig(
                 name='TimestampNode',
-                enabled=True,
+                enabled=False,  # Disabled in favor of EnhancedTimestampNode
                 required=False,
                 max_retries=3,
                 retry_delay=2.0,
                 timeout_seconds=90,
                 dependencies=['YouTubeDataNode'],  # Updated dependency
                 output_keys=['timestamp_data']
+            ),
+            'SemanticAnalysisNode': NodeConfig(
+                name='SemanticAnalysisNode',
+                enabled=True,
+                required=False,
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=180,  # Longer timeout for semantic analysis
+                dependencies=['YouTubeDataNode'],
+                output_keys=['semantic_analysis_result', 'semantic_clusters', 'semantic_keywords', 'semantic_metrics']
+            ),
+            'VectorSearchNode': NodeConfig(
+                name='VectorSearchNode',
+                enabled=True,
+                required=False,
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=120,
+                dependencies=['SemanticAnalysisNode'],
+                output_keys=['vector_search_result', 'coherence_analysis', 'optimized_timestamps']
+            ),
+            'EnhancedTimestampNode': NodeConfig(
+                name='EnhancedTimestampNode',
+                enabled=True,
+                required=False,
+                max_retries=3,
+                retry_delay=2.0,
+                timeout_seconds=120,
+                dependencies=['SemanticAnalysisNode'],  # Can work with or without VectorSearchNode
+                output_keys=['enhanced_timestamps', 'enhanced_timestamp_metadata']
             ),
             'KeywordExtractionNode': NodeConfig(
                 name='KeywordExtractionNode',
@@ -149,7 +179,7 @@ class WorkflowConfig:
                 max_retries=3,
                 retry_delay=1.5,
                 timeout_seconds=60,
-                dependencies=['YouTubeDataNode'],  # Updated dependency
+                dependencies=['YouTubeDataNode'],  # Can benefit from semantic analysis but not required
                 output_keys=['keywords_data']
             )
         }
@@ -237,6 +267,50 @@ class WorkflowConfig:
                     return True
         
         return False
+
+    def get_execution_order(self) -> List[str]:
+        """Get the execution order of enabled nodes based on dependencies."""
+        enabled_nodes = {name: config for name, config in self.node_configs.items() if config.enabled}
+        
+        # If no nodes are enabled, return default order
+        if not enabled_nodes:
+            return ['YouTubeDataNode', 'SummarizationNode', 'EnhancedTimestampNode', 'KeywordExtractionNode']
+        
+        # Simple topological sort for dependency resolution
+        ordered_nodes = []
+        remaining_nodes = set(enabled_nodes.keys())
+        
+        while remaining_nodes:
+            # Find nodes with no unresolved dependencies
+            ready_nodes = []
+            for node_name in remaining_nodes:
+                config = enabled_nodes[node_name]
+                unresolved_deps = [dep for dep in config.dependencies if dep in remaining_nodes]
+                if not unresolved_deps:
+                    ready_nodes.append(node_name)
+            
+            if not ready_nodes:
+                # If no nodes are ready, we have a circular dependency
+                # Add remaining nodes in default order to break the cycle
+                ready_nodes = list(remaining_nodes)
+            
+            # Sort ready nodes by priority (YouTubeDataNode first, etc.)
+            priority_order = ['YouTubeDataNode', 'SummarizationNode', 'SemanticAnalysisNode', 
+                            'VectorSearchNode', 'EnhancedTimestampNode', 'KeywordExtractionNode', 'TimestampNode']
+            
+            ready_nodes.sort(key=lambda x: priority_order.index(x) if x in priority_order else len(priority_order))
+            
+            # Add the first ready node to execution order
+            if ready_nodes:
+                node_to_add = ready_nodes[0]
+                ordered_nodes.append(node_to_add)
+                remaining_nodes.remove(node_to_add)
+        
+        return ordered_nodes
+
+    def get_node_config(self, node_name: str) -> Optional[NodeConfig]:
+        """Get configuration for a specific node."""
+        return self.node_configs.get(node_name)
 
 
 def create_default_workflow_config() -> WorkflowConfig:

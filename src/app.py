@@ -42,62 +42,8 @@ except ImportError:
         from database import db_manager, check_database_health, get_database_session
         from database.connection import get_database_session_dependency
     except ImportError:
-        # Create mock implementations for testing
-        class YouTubeSummarizerFlow:
-            def __init__(self, **kwargs):
-                self.video_service = kwargs.get('video_service', None)
-                self.node_instances = {}
-            def run(self, input_data):
-                return {'status': 'mock_success', 'data': {}}
-            def _initialize_configured_nodes(self):
-                pass
-        
-        class WorkflowError:
-            def __init__(self, **kwargs):
-                pass
-        
-        class MockSettings:
-            def __init__(self):
-                self.app_name = "YouTube Summarizer"
-                self.app_version = "1.0.0"
-                self.log_level = "info"
-        
-        settings = MockSettings()
-        
-        # Mock error handling classes
-        class ErrorMessageProvider:
-            @classmethod
-            def get_error_details(cls, error_code, **kwargs):
-                return None
-            @classmethod
-            def format_error_response(cls, error_details, **kwargs):
-                return {"error": "Mock error"}
-        
-        class ErrorCode:
-            INVALID_URL_FORMAT = "E1001"
-            INTERNAL_SERVER_ERROR = "E7001"
-        
-        def validate_youtube_url_detailed(url):
-            class MockResult:
-                is_valid = True
-                result_type = None
-                error_message = None
-            return MockResult()
-        
-        def get_youtube_error(msg, vid=""): return None
-        def get_llm_error(msg, prov=""): return None
-        def get_network_error(msg, url=""): return None
-        
-        # Mock database classes
-        class MockDBManager:
-            async def initialize(self): return True
-            async def health_check(self): return {"status": "mock"}
-            async def close(self): pass
-        
-        db_manager = MockDBManager()
-        
-        async def check_database_health(): return {"status": "mock"}
-        async def get_database_session(): yield None
+        # If we still get ImportError, there's a configuration issue
+        raise ImportError("Required modules not found. Please check your environment setup and ensure all dependencies are installed.")
 
 # Configure logging
 import os
@@ -200,6 +146,66 @@ except ImportError:
         app.include_router(history_router)
     except ImportError:
         logger.warning("Could not import history router - history endpoints will not be available")
+
+# Include batch processing router
+try:
+    from .api.batch import router as batch_router
+    app.include_router(batch_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.batch import router as batch_router
+        app.include_router(batch_router)
+    except ImportError:
+        logger.warning("Could not import batch router - batch processing endpoints will not be available")
+
+# Include status tracking routers
+try:
+    from .api.status import router as status_router
+    app.include_router(status_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.status import router as status_router
+        app.include_router(status_router)
+    except ImportError:
+        logger.warning("Could not import status router - status tracking endpoints will not be available")
+
+# Include enhanced status tracking router
+try:
+    from .api.status_enhanced import router as status_enhanced_router
+    app.include_router(status_enhanced_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.status_enhanced import router as status_enhanced_router
+        app.include_router(status_enhanced_router)
+    except ImportError:
+        logger.warning("Could not import enhanced status router - enhanced status tracking endpoints will not be available")
+
+# Include notifications router
+try:
+    from .api.notifications import router as notifications_router
+    app.include_router(notifications_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.notifications import router as notifications_router
+        app.include_router(notifications_router)
+    except ImportError:
+        logger.warning("Could not import notifications router - notification endpoints will not be available")
+
+# Include realtime status router
+try:
+    from .api.realtime_status import router as realtime_status_router
+    app.include_router(realtime_status_router)
+except ImportError:
+    # For testing environment
+    try:
+        from api.realtime_status import router as realtime_status_router
+        app.include_router(realtime_status_router)
+    except ImportError:
+        logger.warning("Could not import realtime status router - realtime status endpoints will not be available")
 
 # Add CORS middleware
 app.add_middleware(
@@ -570,6 +576,13 @@ async def root():
             "history": "/api/v1/history/videos",
             "video_detail": "/api/v1/history/videos/{id}",
             "video_statistics": "/api/v1/history/statistics",
+            "batch_create": "/api/v1/batch/batches",
+            "batch_list": "/api/v1/batch/batches",
+            "batch_detail": "/api/v1/batch/batches/{batch_id}",
+            "batch_progress": "/api/v1/batch/batches/{batch_id}/progress",
+            "batch_start": "/api/v1/batch/batches/{batch_id}/start",
+            "batch_cancel": "/api/v1/batch/batches/{batch_id}/cancel",
+            "batch_statistics": "/api/v1/batch/statistics",
             "health": "/health",
             "database_health": "/health/database",
             "metrics": "/metrics",
@@ -792,8 +805,19 @@ async def summarize_video(
         
         for timestamp_data in timestamps:
             if isinstance(timestamp_data, dict):
-                # Extract timestamp info
-                timestamp_str = timestamp_data.get('timestamp', '00:00')
+                # Extract timestamp info - use formatted timestamp if available, otherwise format from seconds
+                timestamp_str = timestamp_data.get('timestamp_formatted')
+                if not timestamp_str:
+                    # Try to get from timestamp field (legacy)
+                    timestamp_str = timestamp_data.get('timestamp')
+                    if not timestamp_str or timestamp_str == '00:00':
+                        # Use timestamp_seconds if available to generate proper timestamp
+                        timestamp_seconds_raw = timestamp_data.get('timestamp_seconds', 0)
+                        if timestamp_seconds_raw and timestamp_seconds_raw > 0:
+                            timestamp_str = format_seconds_to_timestamp(timestamp_seconds_raw)
+                        else:
+                            timestamp_str = '00:00'  # Final fallback
+                
                 description = timestamp_data.get('description', 'Key moment')
                 importance = timestamp_data.get('importance_rating', 5)
                 
@@ -802,8 +826,11 @@ async def summarize_video(
                 base_url = f"https://www.youtube.com/watch?v={video_id}"
                 
                 # Convert timestamp to seconds for URL parameter
-                timestamp_seconds = convert_timestamp_to_seconds(timestamp_str)
-                timestamped_url = f"{base_url}&t={timestamp_seconds}s"
+                timestamp_seconds = timestamp_data.get('timestamp_seconds')
+                if timestamp_seconds is None:
+                    timestamp_seconds = convert_timestamp_to_seconds(timestamp_str)
+                
+                timestamped_url = f"{base_url}&t={int(timestamp_seconds)}s"
                 
                 timestamped_segments.append(TimestampedSegment(
                     timestamp=timestamp_str,
@@ -952,6 +979,22 @@ def convert_timestamp_to_seconds(timestamp_str: str) -> int:
             return 0
     except (ValueError, TypeError):
         return 0
+
+
+def format_seconds_to_timestamp(seconds: float) -> str:
+    """Convert seconds to timestamp string (MM:SS or HH:MM:SS format)."""
+    try:
+        total_seconds = int(seconds)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
+    except (ValueError, TypeError):
+        return "00:00"
 
 
 # Database dependency for endpoints

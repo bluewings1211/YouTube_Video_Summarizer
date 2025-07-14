@@ -10,7 +10,7 @@ import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from .validation_nodes import BaseProcessingNode, Store
+from .validation_nodes import BaseProcessingNode
 from ..utils.smart_llm_client import SmartLLMClient, TaskRequirements, detect_task_requirements
 from ..services.video_service import VideoService
 
@@ -31,7 +31,7 @@ class SummarizationNode(BaseProcessingNode):
         self.target_word_count = 500
         self.video_service = video_service
     
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for text summarization by validating input and setting up LLM client.
         
@@ -87,7 +87,7 @@ class SummarizationNode(BaseProcessingNode):
                 'prep_timestamp': datetime.utcnow().isoformat()
             }
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute text summarization with retry logic.
         
@@ -209,7 +209,7 @@ class SummarizationNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process summary and update store.
         
@@ -376,7 +376,7 @@ class KeywordExtractionNode(BaseProcessingNode):
         self.default_keyword_count = 6  # Middle of 5-8 range
         self.video_service = video_service
     
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for keyword extraction by validating input data.
         
@@ -445,7 +445,7 @@ class KeywordExtractionNode(BaseProcessingNode):
                 'prep_timestamp': datetime.utcnow().isoformat()
             }
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute keyword extraction with retry logic.
         
@@ -557,7 +557,7 @@ class KeywordExtractionNode(BaseProcessingNode):
             'retry_count': self.max_retries
         }
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process keywords and update store.
         

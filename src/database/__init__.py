@@ -12,6 +12,15 @@ from .models import (
     ProcessingMetadata,
     Base
 )
+from .batch_models import (
+    Batch,
+    BatchItem,
+    QueueItem,
+    ProcessingSession,
+    BatchStatus,
+    BatchItemStatus,
+    BatchPriority
+)
 from .connection import (
     get_database_session,
     get_database_engine,
@@ -47,6 +56,15 @@ __all__ = [
     'TimestampedSegment',
     'ProcessingMetadata',
     'Base',
+    
+    # Batch Models
+    'Batch',
+    'BatchItem',
+    'QueueItem',
+    'ProcessingSession',
+    'BatchStatus',
+    'BatchItemStatus',
+    'BatchPriority',
     
     # Connection management
     'get_database_session',

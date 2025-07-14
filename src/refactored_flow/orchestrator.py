@@ -9,9 +9,10 @@ import logging
 import time
 from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
+from dataclasses import dataclass
 
 try:
-    from pocketflow import Flow, Node, Store, FlowState
+    from pocketflow import Flow, Node
 except ImportError:
     # Fallback base classes for development
     from abc import ABC, abstractmethod
@@ -21,88 +22,59 @@ except ImportError:
             self.name = name
             self.logger = logging.getLogger(f"{__name__}.{name}")
             self.nodes: List[Node] = []
-            self.store = Store()
+            self.store = {}
         
         @abstractmethod
         def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
             pass
     
-    class Store(dict):
-        def __init__(self):
-            super().__init__()
-    
-    class FlowState:
-        PENDING = "pending"
-        RUNNING = "running"
-        SUCCESS = "success"
-        FAILED = "failed"
-        PARTIAL = "partial"
+    class Node(ABC):
+        def __init__(self, name: str):
+            self.name = name
+            self.logger = logging.getLogger(f"{__name__}.{name}")
+        
+        @abstractmethod
+        def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
+            pass
+        
+        @abstractmethod
+        def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
+            pass
+        
+        @abstractmethod
+        def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+            pass
+
+# Define FlowState for use in the code
+class FlowState:
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    PARTIAL = "partial"
 
 from .config import WorkflowConfig, NodeConfig, create_default_workflow_config
 from .error_handler import ErrorHandler, WorkflowError
 from .monitoring import WorkflowMonitor, WorkflowMetrics
 
-# Import nodes with fallback for development
-try:
-    from ..nodes import (
-        YouTubeTranscriptNode,
-        YouTubeDataNode,
-        SummarizationNode,
-        TimestampNode,
-        KeywordExtractionNode,
-        NodeError
-    )
-    from ..services.video_service import VideoService
-    from ..database.connection import get_database_session
-    from ..utils.language_detector import (
-        YouTubeLanguageDetector, LanguageDetectionResult, LanguageCode,
-        detect_video_language, is_chinese_video, is_english_video,
-        get_preferred_transcript_languages, optimize_chinese_content_for_llm,
-        ensure_chinese_encoding, detect_mixed_language_content,
-        segment_mixed_language_content
-    )
-except ImportError:
-    # Create mock implementations for development
-    class MockNode:
-        def __init__(self, *args, **kwargs):
-            self.name = kwargs.get('name', 'MockNode')
-        def prep(self, store): return {'prep_status': 'success'}
-        def exec(self, store, prep_result): return {'exec_status': 'success', 'retry_count': 0}
-        def post(self, store, prep_result, exec_result): return {'post_status': 'success'}
-    
-    YouTubeTranscriptNode = MockNode
-    SummarizationNode = MockNode
-    TimestampNode = MockNode
-    KeywordExtractionNode = MockNode
-    
-    class NodeError: pass
-    class LanguageCode:
-        ENGLISH = "en"
-        CHINESE_SIMPLIFIED = "zh-CN"
-        CHINESE_GENERIC = "zh"
-    
-    class LanguageDetectionResult:
-        def __init__(self, detected_language, confidence_score, detection_method):
-            self.detected_language = detected_language
-            self.confidence_score = confidence_score
-            self.detection_method = detection_method
-    
-    class YouTubeLanguageDetector:
-        def detect_language_comprehensive(self, metadata, transcript=None):
-            return LanguageDetectionResult(LanguageCode.ENGLISH, 0.9, "mock")
-    
-    def detect_video_language(metadata, transcript=None):
-        return LanguageDetectionResult(LanguageCode.ENGLISH, 0.9, "mock")
-    def is_chinese_video(metadata, transcript=None): return False
-    def is_english_video(metadata, transcript=None): return True
-    def get_preferred_transcript_languages(metadata, transcript=None): return ['en']
-    def optimize_chinese_content_for_llm(text, task_type="summarization"): 
-        return {'optimized_text': text, 'system_prompt': f'Process for {task_type}', 'user_prompt': text}
-    def ensure_chinese_encoding(text): return text
-    def detect_mixed_language_content(text, chunk_size=500): 
-        return {'is_mixed': False, 'primary_language': 'en'}
-    def segment_mixed_language_content(text, target_languages=None): 
-        return {'is_segmented': False, 'segments': [{'language': 'en', 'content': text}]}
+# Import services and utilities - lazy import to avoid circular imports
+from ..database.connection import get_database_session
+from ..utils.language_detector import (
+    YouTubeLanguageDetector, LanguageDetectionResult, LanguageCode,
+    detect_video_language, is_chinese_video, is_english_video,
+    get_preferred_transcript_languages, optimize_chinese_content_for_llm,
+    ensure_chinese_encoding, detect_mixed_language_content,
+    segment_mixed_language_content
+)
+
+# Define BatchProcessingConfig here to avoid circular imports
+@dataclass
+class BatchProcessingConfig:
+    """Configuration for batch processing operations."""
+    max_concurrent_jobs: int = 5
+    batch_timeout_seconds: int = 3600
+    retry_failed_jobs: bool = True
+    max_retries_per_job: int = 3
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +105,8 @@ class YouTubeSummarizerFlow(Flow):
             timeout_seconds: Total workflow timeout in seconds (legacy)
             video_service: Optional video service for database persistence
         """
-        super().__init__("YouTubeSummarizerFlow")
+        super().__init__()
+        self.name = "YouTubeSummarizerFlow"
         
         # Initialize configuration
         if config:
@@ -169,7 +142,7 @@ class YouTubeSummarizerFlow(Flow):
         # Initialize circuit breakers
         self._initialize_circuit_breakers()
         
-        logger.info(f"YouTubeSummarizerFlow initialized with {len(self.nodes)} nodes")
+        logger.info(f"YouTubeSummarizerFlow initialized with {len(self.node_instances)} nodes")
 
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -193,7 +166,7 @@ class YouTubeSummarizerFlow(Flow):
             self._validate_input(input_data)
             
             # Initialize store with input data
-            self.store = Store()
+            self.store = {}
             self.store.update(input_data)
             
             # Check for duplicate videos and handle accordingly
@@ -251,6 +224,547 @@ class YouTubeSummarizerFlow(Flow):
             
             return self._prepare_error_result(error_info)
 
+    def _create_default_config(self, enable_monitoring: bool, enable_fallbacks: bool, 
+                             max_retries: int, timeout_seconds: int) -> WorkflowConfig:
+        """Create default configuration from legacy parameters."""
+        config = create_default_workflow_config()
+        config.enable_monitoring = enable_monitoring
+        config.enable_fallbacks = enable_fallbacks
+        config.max_retries = max_retries
+        config.timeout_seconds = timeout_seconds
+        return config
+
+    def _initialize_configured_nodes(self) -> None:
+        """Initialize nodes based on configuration."""
+        # Ensure we have default node configs
+        self.config.create_default_node_configs()
+        
+        # Lazy import node classes to avoid circular imports
+        def get_node_classes():
+            try:
+                from ..refactored_nodes.youtube_data_node import YouTubeDataNode
+                from ..refactored_nodes.llm_nodes import SummarizationNode, KeywordExtractionNode
+                from ..refactored_nodes.summary_nodes import TimestampNode
+                from ..refactored_nodes.semantic_analysis_nodes import (
+                    SemanticAnalysisNode,
+                    VectorSearchNode,
+                    EnhancedTimestampNode
+                )
+                
+                return {
+                    'YouTubeDataNode': YouTubeDataNode,      # Unified YouTube data acquisition
+                    'SummarizationNode': SummarizationNode,  # Generate summary
+                    'SemanticAnalysisNode': SemanticAnalysisNode,  # Semantic analysis and clustering
+                    'VectorSearchNode': VectorSearchNode,    # Vector-based search and optimization
+                    'EnhancedTimestampNode': EnhancedTimestampNode,  # Enhanced timestamp generation
+                    'KeywordExtractionNode': KeywordExtractionNode,  # Keyword extraction
+                    # Keep TimestampNode for backward compatibility (but not in default execution order)
+                    'TimestampNode': TimestampNode
+                }
+            except ImportError as e:
+                logger.warning(f"Could not import all node classes: {e}")
+                return {}
+        
+        # Create node instances
+        node_classes = get_node_classes()
+        
+        for node_name, node_class in node_classes.items():
+            node_config = self.config.get_node_config(node_name)
+            if node_config and node_config.enabled:
+                # Create node with video service for database persistence
+                node_kwargs = {
+                    'max_retries': node_config.max_retries,
+                    'retry_delay': node_config.retry_delay
+                }
+                
+                # Add video_service parameter if the node supports it
+                if self.video_service and hasattr(node_class.__init__, '__code__'):
+                    init_params = node_class.__init__.__code__.co_varnames
+                    if 'video_service' in init_params:
+                        node_kwargs['video_service'] = self.video_service
+                
+                self.node_instances[node_name] = node_class(**node_kwargs)
+                logger.debug(f"Initialized node: {node_name} with database support: {self.video_service is not None}")
+
+    def _initialize_circuit_breakers(self) -> None:
+        """Initialize circuit breakers for nodes."""
+        for node_name in self.node_instances.keys():
+            self.error_handler.create_circuit_breaker(
+                node_name, 
+                self.config.circuit_breaker_config
+            )
+
+    def _validate_input(self, input_data: Dict[str, Any]) -> None:
+        """Validate input data for the workflow."""
+        if not isinstance(input_data, dict):
+            raise ValueError("Input data must be a dictionary")
+        
+        if 'youtube_url' not in input_data:
+            raise ValueError("Missing required 'youtube_url' in input data")
+        
+        youtube_url = input_data['youtube_url']
+        if not isinstance(youtube_url, str) or not youtube_url.strip():
+            raise ValueError("youtube_url must be a non-empty string")
+
+    def _prepare_final_result(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare the final workflow result."""
+        # Extract data from store for API compatibility
+        store_data = dict(self.store) if hasattr(self, 'store') else {}
+        
+        # Extract video metadata if available
+        video_metadata = store_data.get('video_metadata', {})
+        transcript_data = store_data.get('transcript_data', {})
+        
+        # Log basic success info without dumping full data
+        video_title = video_metadata.get('title', 'Unknown')[:50] + '...' if len(video_metadata.get('title', '')) > 50 else video_metadata.get('title', 'Unknown')
+        transcript_length = transcript_data.get('word_count', 0) if transcript_data else 0
+        logger.info(f"Final result prepared: '{video_title}' ({transcript_length} words)")
+        
+        # Build the data structure that the API expects
+        api_data = {
+            'video_id': video_metadata.get('video_id', store_data.get('video_id', '')),
+            'title': video_metadata.get('title', store_data.get('video_title', '')),
+            'duration': video_metadata.get('duration_seconds', video_metadata.get('duration', store_data.get('video_duration', 0))),
+            'summary': store_data.get('summary_text', ''),
+            'keywords': store_data.get('keywords', []),
+            'timestamps': store_data.get('timestamps', [])
+        }
+        
+        return {
+            'status': 'success',
+            'data': api_data,
+            'workflow_metadata': {
+                'execution_time': time.time(),
+                'nodes_executed': len(self.node_instances),
+                'config_enabled': {
+                    'monitoring': self.enable_monitoring,
+                    'fallbacks': self.enable_fallbacks
+                }
+            }
+        }
+
+    def _prepare_error_result(self, error_info: WorkflowError) -> Dict[str, Any]:
+        """Prepare an error result."""
+        return {
+            'status': 'failed',
+            'error': error_info.to_dict(),
+            'store_data': dict(self.store) if hasattr(self, 'store') else {},
+            'error_summary': self.error_handler.get_error_summary(),
+            'workflow_metadata': {
+                'execution_time': time.time(),
+                'failed_at': error_info.failed_node or 'workflow_setup'
+            }
+        }
+
+    def _execute_fallback_workflow(self, input_data: Dict[str, Any], error_info: WorkflowError) -> Dict[str, Any]:
+        """Execute a simplified fallback workflow."""
+        logger.info("Executing fallback workflow")
+        
+        try:
+            # Initialize minimal store
+            if not hasattr(self, 'store'):
+                self.store = {}
+            self.store.update(input_data)
+            
+            # Try to execute just the YouTube data node
+            if 'YouTubeDataNode' in self.node_instances:
+                result = self._execute_single_node('YouTubeDataNode')
+                
+                return {
+                    'success': True,
+                    'fallback_mode': True,
+                    'partial_results': result,
+                    'original_error': error_info.to_dict()
+                }
+            
+        except Exception as fallback_error:
+            logger.error(f"Fallback workflow also failed: {str(fallback_error)}")
+        
+        return self._prepare_error_result(error_info)
+
+    def _handle_duplicate_detection(self, input_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Handle duplicate video detection and processing decisions."""
+        # Check if duplicate detection is enabled
+        if not hasattr(self.config, 'duplicate_handling') or not getattr(self.config.duplicate_handling, 'enable_duplicate_detection', False):
+            return None
+            
+        if not self.video_service:
+            # No database service available, proceed with processing
+            return None
+        
+        try:
+            # Extract video ID from URL
+            youtube_url = input_data.get('youtube_url', '')
+            video_id = self._extract_video_id(youtube_url)
+            
+            if not video_id:
+                # Cannot extract video ID, proceed with processing
+                return None
+            
+            # For now, just proceed with processing - duplicate detection can be enhanced later
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Duplicate detection failed: {str(e)}")
+            return None
+
+    def _extract_video_id(self, youtube_url: str) -> Optional[str]:
+        """Extract video ID from YouTube URL."""
+        import re
+        # Match various YouTube URL formats
+        patterns = [
+            r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+            r'(?:embed\/)([0-9A-Za-z_-]{11})',
+            r'(?:watch\?v=)([0-9A-Za-z_-]{11})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, youtube_url)
+            if match:
+                return match.group(1)
+        return None
+
+    def _execute_configured_workflow(self) -> Dict[str, Any]:
+        """Execute the configured workflow with all enabled nodes."""
+        # Get the execution order from configuration
+        execution_order = self.config.get_execution_order()
+        
+        # Initialize results
+        results = {}
+        
+        for node_name in execution_order:
+            if self._should_execute_node(node_name):
+                try:
+                    result = self._execute_single_node(node_name)
+                    results[node_name] = result
+                except Exception as e:
+                    logger.error(f"Node {node_name} execution failed: {str(e)}")
+                    # Error handling will be done by the error handler
+                    raise
+        
+        return results
+
+    def _execute_single_node(self, node_name: str) -> Dict[str, Any]:
+        """Execute a single node with proper error handling."""
+        if node_name not in self.node_instances:
+            raise ValueError(f"Node {node_name} not found in instances")
+        
+        node = self.node_instances[node_name]
+        
+        # Execute node phases
+        try:
+            prep_result = node.prep(self.store)
+            exec_result = node.exec(self.store, prep_result)
+            post_result = node.post(self.store, prep_result, exec_result)
+            
+            return {
+                'prep': prep_result,
+                'exec': exec_result,
+                'post': post_result,
+                'success': True
+            }
+        except Exception as e:
+            logger.error(f"Node {node_name} execution failed: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'node': node_name
+            }
+
+    def _should_execute_node(self, node_name: str) -> bool:
+        """Check if a node should be executed based on configuration."""
+        node_config = self.config.get_node_config(node_name)
+        should_execute = node_config and node_config.enabled
+        logger.debug(f"Node {node_name}: config exists={node_config is not None}, enabled={node_config.enabled if node_config else False}, should_execute={should_execute}")
+        return should_execute
+
+    def _configure_database_degradation(self):
+        """Configure graceful degradation for database issues."""
+        # For now, just log that we're checking database health
+        logger.debug("Checking database health for graceful degradation")
+
+    def _execute_workflow_with_timeout(self) -> Dict[str, Any]:
+        """Execute the workflow with timeout protection."""
+        try:
+            # Execute the configured workflow
+            return self._execute_configured_workflow()
+        except Exception as e:
+            logger.error(f"Workflow execution failed: {str(e)}")
+            raise
+
+    def _save_workflow_completion_metadata(self, input_data: Dict[str, Any], result: Dict[str, Any]):
+        """Save workflow completion metadata."""
+        # For now, just log completion
+        logger.debug(f"Workflow completed for URL: {input_data.get('youtube_url', 'unknown')}")
+
+    def reset_workflow(self) -> None:
+        """Reset the workflow state for reuse."""
+        try:
+            # Clear the store
+            if hasattr(self, 'store'):
+                self.store.clear()
+            
+            # Reset error handler
+            if hasattr(self, 'error_handler'):
+                self.error_handler.reset()
+            
+            # Reset monitor
+            if hasattr(self, 'monitor') and self.monitor:
+                self.monitor.reset()
+            
+            logger.debug("Workflow state reset successfully")
+        except Exception as e:
+            logger.warning(f"Error during workflow reset: {str(e)}")
+
+
+class YouTubeBatchProcessingFlow(Flow):
+    """
+    Workflow for batch processing multiple YouTube videos.
+    
+    This flow orchestrates the batch processing of multiple YouTube URLs
+    through a queue-based system with worker management.
+    """
+    
+    def __init__(self, 
+                 config: Optional[WorkflowConfig] = None,
+                 batch_config: Optional[BatchProcessingConfig] = None,
+                 enable_monitoring: bool = True,
+                 video_service=None):
+        """
+        Initialize the YouTube batch processing workflow.
+        
+        Args:
+            config: Workflow configuration
+            batch_config: Batch processing specific configuration
+            enable_monitoring: Whether to enable performance monitoring
+            video_service: Optional video service for database persistence
+        """
+        super().__init__()
+        self.name = "YouTubeBatchProcessingFlow"
+        
+        # Initialize configuration
+        self.config = config or create_default_workflow_config()
+        self.batch_config = batch_config or BatchProcessingConfig()
+        self.enable_monitoring = enable_monitoring
+        
+        # Initialize core components
+        self.error_handler = ErrorHandler(self.name)
+        self.monitor = WorkflowMonitor(self.name) if enable_monitoring else None
+        self.node_instances: Dict[str, Node] = {}
+        self.video_service = video_service
+        
+        # Initialize batch processing nodes
+        self._initialize_batch_nodes()
+        
+        # Initialize circuit breakers
+        self._initialize_circuit_breakers()
+        
+        logger.info(f"YouTubeBatchProcessingFlow initialized with {len(self.nodes)} nodes")
+
+    def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute the complete batch processing workflow.
+        
+        Args:
+            input_data: Dictionary containing 'batch_urls' and optional 'batch_config'
+            
+        Returns:
+            Dictionary containing all processing results or error information
+        """
+        logger.info(f"Starting YouTube batch processing workflow with input: {input_data}")
+        
+        # Start monitoring
+        if self.monitor:
+            self.monitor.start_workflow()
+        
+        try:
+            # Validate input
+            self._validate_batch_input(input_data)
+            
+            # Initialize store with input data
+            self.store = {}
+            self.store.update(input_data)
+            
+            # Execute batch processing workflow
+            result = self._execute_batch_workflow()
+            
+            # Finalize monitoring
+            if self.monitor:
+                self.monitor.finish_workflow(success=True)
+            
+            logger.info("Batch processing workflow completed successfully")
+            return self._prepare_batch_final_result(result)
+            
+        except Exception as e:
+            # Handle workflow error
+            error_info = self.error_handler.handle_node_error(e, "batch_workflow", "execution")
+            
+            # Finalize monitoring
+            if self.monitor:
+                self.monitor.finish_workflow(success=False)
+            
+            return self._prepare_error_result(error_info)
+
+    def _execute_batch_workflow(self) -> Dict[str, Any]:
+        """Execute the batch processing workflow with all nodes."""
+        results = {}
+        
+        # Define batch processing node execution order
+        batch_node_order = [
+            'BatchCreationNode',    # Create batch and validate URLs
+            'BatchProcessingNode',  # Process all batch items
+            'BatchStatusNode'       # Monitor status and provide final report
+        ]
+        
+        for node_name in batch_node_order:
+            if not self._should_execute_node(node_name):
+                logger.info(f"Skipping disabled batch node: {node_name}")
+                continue
+            
+            try:
+                # Check circuit breaker
+                if not self.error_handler.can_node_execute(node_name):
+                    logger.warning(f"Circuit breaker open for {node_name}, skipping")
+                    continue
+                
+                # Execute node
+                result = self._execute_single_node(node_name)
+                results[node_name] = result
+                
+                # Log node completion
+                logger.debug(f"Batch node {node_name} completed with result keys: {list(result.keys())}")
+                
+                # Record success
+                self.error_handler.handle_node_success(node_name)
+                if self.monitor:
+                    self.monitor.finish_node(node_name, "success")
+                
+                # Check if we should continue based on node results
+                if not self._should_continue_batch_processing(node_name, result):
+                    logger.info(f"Stopping batch processing after {node_name}")
+                    break
+                
+            except Exception as e:
+                # Handle node error
+                error_info = self.error_handler.handle_node_error(e, node_name)
+                results[node_name] = {'error': error_info.to_dict()}
+                
+                if self.monitor:
+                    self.monitor.record_error(node_name)
+                    self.monitor.finish_node(node_name, "failed")
+                
+                # Check if node is required for batch processing
+                if node_name in ['BatchCreationNode']:  # Critical nodes
+                    raise e
+                
+                logger.warning(f"Non-critical batch node {node_name} failed, continuing workflow")
+        
+        return results
+
+    def _initialize_batch_nodes(self) -> None:
+        """Initialize batch processing nodes."""
+        # Create batch processing node instances
+        batch_node_classes = {
+            'BatchCreationNode': BatchCreationNode,
+            'BatchProcessingNode': BatchProcessingNode,
+            'BatchStatusNode': BatchStatusNode
+        }
+        
+        for node_name, node_class in batch_node_classes.items():
+            # Create node with batch configuration
+            node_kwargs = {
+                'max_retries': 3,
+                'retry_delay': 2.0,
+                'config': self.batch_config
+            }
+            
+            self.node_instances[node_name] = node_class(**node_kwargs)
+            logger.debug(f"Initialized batch node: {node_name}")
+
+    def _initialize_circuit_breakers(self) -> None:
+        """Initialize circuit breakers for batch processing nodes."""
+        for node_name in self.node_instances.keys():
+            self.error_handler.create_circuit_breaker(
+                node_name, 
+                self.config.circuit_breaker_config
+            )
+
+    def _should_execute_node(self, node_name: str) -> bool:
+        """Check if a batch processing node should be executed."""
+        # All batch processing nodes are required by default
+        return node_name in self.node_instances
+
+    def _should_continue_batch_processing(self, node_name: str, result: Dict[str, Any]) -> bool:
+        """Determine if batch processing should continue after a node completes."""
+        # Check if the node completed successfully
+        post_result = result.get('post_result', {})
+        if post_result.get('processing_status') != 'success':
+            logger.warning(f"Node {node_name} did not complete successfully")
+            return False
+        
+        # Special handling for different nodes
+        if node_name == 'BatchCreationNode':
+            # Must have successfully created a batch
+            return post_result.get('batch_created', False)
+        
+        elif node_name == 'BatchProcessingNode':
+            # Should continue to status monitoring regardless of processing results
+            return True
+        
+        elif node_name == 'BatchStatusNode':
+            # This is the final node
+            return False
+        
+        return True
+
+    def _validate_batch_input(self, input_data: Dict[str, Any]) -> None:
+        """Validate input data for batch processing."""
+        if not isinstance(input_data, dict):
+            raise ValueError("Input data must be a dictionary")
+        
+        if 'batch_urls' not in input_data:
+            raise ValueError("Missing required 'batch_urls' in input data")
+        
+        batch_urls = input_data['batch_urls']
+        if not isinstance(batch_urls, list) or not batch_urls:
+            raise ValueError("batch_urls must be a non-empty list")
+
+    def _prepare_batch_final_result(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare the final batch processing result."""
+        # Extract data from store for API compatibility
+        store_data = dict(self.store)
+        
+        # Extract batch information
+        batch_id = store_data.get('batch_id', 'unknown')
+        batch_status = store_data.get('batch_final_status', 'unknown')
+        batch_statistics = store_data.get('batch_statistics', {})
+        
+        # Build the final result structure
+        final_result = {
+            'status': 'success',
+            'batch_id': batch_id,
+            'batch_status': batch_status,
+            'batch_statistics': batch_statistics,
+            'results': results,
+            'store_data': store_data,
+            'workflow_metadata': {
+                'execution_time': time.time(),
+                'nodes_executed': list(results.keys()),
+                'workflow_type': 'batch_processing'
+            }
+        }
+        
+        # Add monitoring data if available
+        if self.monitor and self.monitor.metrics:
+            final_result['metrics'] = self.monitor.metrics.get_summary()
+        
+        # Add error summary
+        error_summary = self.error_handler.get_error_summary()
+        if error_summary['total_errors'] > 0:
+            final_result['error_summary'] = error_summary
+        
+        return final_result
+
     def _execute_workflow_with_timeout(self) -> Dict[str, Any]:
         """Execute the workflow with timeout protection."""
         start_time = time.time()
@@ -276,12 +790,14 @@ class YouTubeSummarizerFlow(Flow):
         """Execute all nodes in sequential order."""
         results = {}
         
-        # Define node execution order
+        # Define node execution order with semantic analysis integration
         node_order = [
-            'YouTubeDataNode',  # Unified YouTube data acquisition
-            'SummarizationNode', 
-            'TimestampNode',
-            'KeywordExtractionNode'
+            'YouTubeDataNode',      # Unified YouTube data acquisition
+            'SummarizationNode',    # Generate summary 
+            'SemanticAnalysisNode', # Perform semantic analysis and clustering
+            'VectorSearchNode',     # Vector-based search and optimization
+            'EnhancedTimestampNode', # Enhanced timestamp generation (replaces TimestampNode)
+            'KeywordExtractionNode' # Keyword extraction (can benefit from semantic data)
         ]
         
         for node_name in node_order:
@@ -310,6 +826,14 @@ class YouTubeSummarizerFlow(Flow):
                 # Perform language detection after YouTube data acquisition
                 if node_name == 'YouTubeDataNode' and result.get('post_status') == 'success':
                     self._perform_language_detection()
+                
+                # Handle semantic analysis fallback
+                if node_name == 'SemanticAnalysisNode' and result.get('post_status') != 'success':
+                    self._handle_semantic_analysis_fallback()
+                
+                # Handle vector search fallback
+                if node_name == 'VectorSearchNode' and result.get('post_status') != 'success':
+                    self._handle_vector_search_fallback()
                 
             except Exception as e:
                 # Handle node error
@@ -449,6 +973,7 @@ class YouTubeSummarizerFlow(Flow):
             # Check if video exists in database (now synchronous)
             try:
                 with get_database_session() as session:
+                    from ..services.video_service import VideoService
                     video_service = VideoService(session)
                     video_exists = video_service.video_exists(video_id)
             except Exception as e:
@@ -477,6 +1002,7 @@ class YouTubeSummarizerFlow(Flow):
             elif reprocess_policy == 'if_failed':
                 # Check if previous processing failed
                 with get_database_session() as session:
+                    from ..services.video_service import VideoService
                     video_service = VideoService(session)
                     processing_status = video_service.get_processing_status(video_id)
                 if processing_status == 'failed':
@@ -689,6 +1215,7 @@ class YouTubeSummarizerFlow(Flow):
             try:
                 # Simple existence check - this should be fast
                 with get_database_session() as session:
+                    from ..services.video_service import VideoService
                     video_service = VideoService(session)
                     video_service.video_exists("test_health_check")
                 db_healthy = True
@@ -739,55 +1266,6 @@ class YouTubeSummarizerFlow(Flow):
         should_execute = node_config and node_config.enabled
         logger.debug(f"Node {node_name}: config exists={node_config is not None}, enabled={node_config.enabled if node_config else False}, should_execute={should_execute}")
         return should_execute
-
-    def _initialize_configured_nodes(self) -> None:
-        """Initialize nodes based on configuration."""
-        # Ensure we have default node configs
-        self.config.create_default_node_configs()
-        
-        # Create node instances
-        node_classes = {
-            'YouTubeDataNode': YouTubeDataNode,  # Unified YouTube data acquisition
-            'SummarizationNode': SummarizationNode,
-            'TimestampNode': TimestampNode,
-            'KeywordExtractionNode': KeywordExtractionNode
-        }
-        
-        for node_name, node_class in node_classes.items():
-            node_config = self.config.get_node_config(node_name)
-            if node_config and node_config.enabled:
-                # Create node with video service for database persistence
-                node_kwargs = {
-                    'max_retries': node_config.max_retries,
-                    'retry_delay': node_config.retry_delay
-                }
-                
-                # Add video_service parameter if the node supports it
-                if self.video_service and hasattr(node_class.__init__, '__code__'):
-                    init_params = node_class.__init__.__code__.co_varnames
-                    if 'video_service' in init_params:
-                        node_kwargs['video_service'] = self.video_service
-                
-                self.node_instances[node_name] = node_class(**node_kwargs)
-                logger.debug(f"Initialized node: {node_name} with database support: {self.video_service is not None}")
-
-    def _initialize_circuit_breakers(self) -> None:
-        """Initialize circuit breakers for nodes."""
-        for node_name in self.node_instances.keys():
-            self.error_handler.create_circuit_breaker(
-                node_name, 
-                self.config.circuit_breaker_config
-            )
-
-    def _create_default_config(self, enable_monitoring: bool, enable_fallbacks: bool, 
-                             max_retries: int, timeout_seconds: int) -> WorkflowConfig:
-        """Create default configuration from legacy parameters."""
-        config = create_default_workflow_config()
-        config.enable_monitoring = enable_monitoring
-        config.enable_fallbacks = enable_fallbacks
-        config.max_retries = max_retries
-        config.timeout_seconds = timeout_seconds
-        return config
 
     def _validate_input(self, input_data: Dict[str, Any]) -> None:
         """Validate input data for the workflow."""
@@ -872,6 +1350,42 @@ class YouTubeSummarizerFlow(Flow):
             final_result['error_summary'] = error_summary
         
         return final_result
+
+    def _handle_semantic_analysis_fallback(self) -> None:
+        """Handle fallback when semantic analysis fails."""
+        logger.warning("Semantic analysis failed, setting up fallback data")
+        
+        # Set empty semantic analysis data for downstream nodes
+        self.store['semantic_analysis_result'] = {
+            'status': 'fallback',
+            'reason': 'semantic_analysis_failed',
+            'timestamps': [],
+            'semantic_clusters': [],
+            'semantic_keywords': [],
+            'semantic_metrics': {}
+        }
+        self.store['semantic_clusters'] = []
+        self.store['semantic_keywords'] = []
+        self.store['semantic_metrics'] = {}
+        self.store['semantic_timestamps'] = []
+        
+        logger.info("Semantic analysis fallback data prepared")
+
+    def _handle_vector_search_fallback(self) -> None:
+        """Handle fallback when vector search fails."""
+        logger.warning("Vector search failed, setting up fallback data")
+        
+        # Set empty vector search data for downstream nodes
+        self.store['vector_search_result'] = {
+            'exec_status': 'fallback',
+            'reason': 'vector_search_failed',
+            'coherence_analysis': {'coherence_score': 0.0, 'analysis': 'fallback'},
+            'optimized_timestamps': []
+        }
+        self.store['coherence_analysis'] = {'coherence_score': 0.0, 'analysis': 'fallback'}
+        self.store['optimized_timestamps'] = []
+        
+        logger.info("Vector search fallback data prepared")
 
     def _prepare_error_result(self, error_info: WorkflowError) -> Dict[str, Any]:
         """Prepare an error result."""

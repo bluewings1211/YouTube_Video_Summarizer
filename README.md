@@ -696,7 +696,7 @@ docker run -d \
 | `ENVIRONMENT` | Environment (dev/prod) | No | `development` |
 | `PORT` | Server port | No | `8000` |
 | `LOG_LEVEL` | Logging level | No | `info` |
-| `MAX_VIDEO_DURATION` | Max video length (seconds) | No | `1800` |
+| `MAX_VIDEO_DURATION` | Max video length (seconds) - videos longer than this will be rejected | No | `1800` (30 min) |
 
 *At least one API key is required
 
@@ -753,7 +753,9 @@ Structured JSON logging with:
 3. **Video Too Long**
    ```
    Error: Video exceeds maximum duration limit
-   Solution: Use videos under 30 minutes
+   Solution: Use videos under 30 minutes, or adjust MAX_VIDEO_DURATION in .env file
+   # To allow 60-minute videos, set:
+   MAX_VIDEO_DURATION=3600
    ```
 
 4. **No Transcript Available**

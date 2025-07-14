@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
 try:
-    from pocketflow import Node, NodeState, Store
+    from pocketflow import Node
 except ImportError:
     # Fallback base classes for development
     class Node(ABC):
@@ -22,15 +22,15 @@ except ImportError:
             self.logger = logging.getLogger(f"{__name__}.{name}")
         
         @abstractmethod
-        def prep(self, store: "Store") -> Dict[str, Any]:
+        def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
             pass
         
         @abstractmethod
-        def exec(self, store: "Store", prep_result: Dict[str, Any]) -> Dict[str, Any]:
+        def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
             pass
         
         @abstractmethod
-        def post(self, store: "Store", prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+        def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
             pass
     
     class Store(dict):
@@ -64,8 +64,8 @@ class BaseProcessingNode(Node):
     """Base class for all processing nodes with common functionality."""
     
     def __init__(self, name: str, max_retries: int = 3, retry_delay: float = 1.0):
-        super().__init__(name)
-        self.max_retries = max_retries
+        super().__init__(max_retries=max_retries, wait=retry_delay)
+        self.name = name  # Set name manually since PocketFlow doesn't use it in constructor
         self.retry_delay = retry_delay
         self.logger = logging.getLogger(f"{__name__}.{name}")
     
@@ -174,7 +174,7 @@ class BaseProcessingNode(Node):
             self.logger.info(f"Retrying in {delay:.2f} seconds...")
             time.sleep(delay)
     
-    def _validate_store_data(self, store: Store, required_keys: List[str]) -> Tuple[bool, List[str]]:
+    def _validate_store_data(self, store: Dict[str, Any], required_keys: List[str]) -> Tuple[bool, List[str]]:
         """Validate that required data is present in the store."""
         missing_keys = []
         for key in required_keys:
@@ -183,7 +183,7 @@ class BaseProcessingNode(Node):
         
         return len(missing_keys) == 0, missing_keys
     
-    def _safe_store_update(self, store: Store, data: Dict[str, Any]) -> None:
+    def _safe_store_update(self, store: Dict[str, Any], data: Dict[str, Any]) -> None:
         """Safely update store with new data."""
         try:
             store.update(data)
@@ -218,7 +218,7 @@ class BaseProcessingNode(Node):
         else:
             raise RuntimeError("Operation failed without specific error")
     
-    def _validate_inputs(self, required_keys: List[str], store: Store) -> None:
+    def _validate_inputs(self, required_keys: List[str], store: Dict[str, Any]) -> None:
         """Validate that all required inputs are present in the store."""
         missing_keys = []
         for key in required_keys:

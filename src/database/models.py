@@ -284,11 +284,87 @@ def get_all_models():
     return [Video, Transcript, Summary, Keyword, TimestampedSegment, ProcessingMetadata]
 
 
+def get_all_models_with_batch():
+    """Get all model classes including batch models."""
+    from .batch_models import get_all_batch_models
+    return get_all_models() + get_all_batch_models()
+
+
+def get_all_models_with_status():
+    """Get all model classes including status tracking models."""
+    from .status_models import get_all_status_models
+    return get_all_models() + get_all_status_models()
+
+
+def get_all_models_with_notifications():
+    """Get all model classes including notification models."""
+    from .notification_models import get_all_notification_models
+    return get_all_models() + get_all_notification_models()
+
+
+def get_all_models_complete():
+    """Get all model classes including batch, status tracking, and notification models."""
+    from .batch_models import get_all_batch_models
+    from .status_models import get_all_status_models
+    from .notification_models import get_all_notification_models
+    return get_all_models() + get_all_batch_models() + get_all_status_models() + get_all_notification_models()
+
+
 def create_tables(engine):
     """Create all tables in the database."""
     Base.metadata.create_all(bind=engine)
 
 
+def create_all_tables(engine):
+    """Create all tables including batch processing tables."""
+    from .batch_models import create_batch_tables
+    Base.metadata.create_all(bind=engine)
+    create_batch_tables(engine)
+
+
+def create_all_tables_with_notifications(engine):
+    """Create all tables including notification tables."""
+    from .notification_models import create_notification_tables
+    Base.metadata.create_all(bind=engine)
+    create_notification_tables(engine)
+
+
+def create_all_tables_complete(engine):
+    """Create all tables including batch processing, status tracking, and notification tables."""
+    from .batch_models import create_batch_tables
+    from .status_models import create_status_tables
+    from .notification_models import create_notification_tables
+    Base.metadata.create_all(bind=engine)
+    create_batch_tables(engine)
+    create_status_tables(engine)
+    create_notification_tables(engine)
+
+
 def drop_tables(engine):
     """Drop all tables from the database."""
+    Base.metadata.drop_all(bind=engine)
+
+
+def drop_all_tables(engine):
+    """Drop all tables including batch processing tables."""
+    from .batch_models import drop_batch_tables
+    drop_batch_tables(engine)
+    Base.metadata.drop_all(bind=engine)
+
+
+def drop_all_tables_with_notifications(engine):
+    """Drop all tables including notification tables."""
+    from .notification_models import drop_notification_tables
+    drop_notification_tables(engine)
+    Base.metadata.drop_all(bind=engine)
+
+
+def drop_all_tables_complete(engine):
+    """Drop all tables including batch processing, status tracking, and notification tables."""
+    from .batch_models import drop_batch_tables
+    from .status_models import drop_status_tables
+    from .notification_models import drop_notification_tables
+    drop_notification_tables(engine)
+    drop_status_tables(engine)
+    drop_batch_tables(engine)
     Base.metadata.drop_all(bind=engine)

@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from .validation_nodes import BaseProcessingNode, Store
+from .validation_nodes import BaseProcessingNode
 from ..utils.youtube_fetcher import YouTubeUnifiedFetcher
 from ..utils.youtube_core import YouTubeTranscriptError
 from ..utils.validators import YouTubeURLValidator
@@ -40,7 +40,7 @@ class YouTubeDataNode(BaseProcessingNode):
         self.enable_enhanced_acquisition = enable_enhanced_acquisition
         self.video_service = video_service
     
-    def prep(self, store: Store) -> Dict[str, Any]:
+    def prep(self, store: Dict[str, Any]) -> Dict[str, Any]:
         """
         Prepare for YouTube data acquisition by validating input.
         
@@ -98,7 +98,7 @@ class YouTubeDataNode(BaseProcessingNode):
             
             return prep_result
     
-    def exec(self, store: Store, prep_result: Dict[str, Any]) -> Dict[str, Any]:
+    def exec(self, store: Dict[str, Any], prep_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute unified YouTube data acquisition.
         
@@ -179,7 +179,7 @@ class YouTubeDataNode(BaseProcessingNode):
             
             return exec_result
     
-    def post(self, store: Store, prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
+    def post(self, store: Dict[str, Any], prep_result: Dict[str, Any], exec_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Post-process YouTube data and update store.
         

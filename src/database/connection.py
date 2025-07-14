@@ -294,6 +294,9 @@ class DatabaseManager:
 # Global database manager instance
 db_manager = DatabaseManager()
 
+# Alias for backward compatibility
+get_db_session = get_database_session
+
 
 # Utility functions for common database operations
 def execute_query(query: str, parameters: Optional[Dict[str, Any]] = None) -> Any:

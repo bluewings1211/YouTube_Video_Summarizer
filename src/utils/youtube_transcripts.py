@@ -39,12 +39,8 @@ from .proxy_manager import get_proxy_manager, get_retry_manager
 try:
     from .language_detector import YouTubeLanguageDetector
 except ImportError:
-    # Mock for development
-    class YouTubeLanguageDetector:
-        def detect_language_from_metadata(self, metadata):
-            return None
-        def get_preferred_transcript_languages(self, detection_result):
-            return ['en']
+    # If we still get ImportError, there's a configuration issue
+    raise ImportError("YouTubeLanguageDetector not found. Please check your environment setup and ensure all dependencies are installed.")
 
 logger = logging.getLogger(__name__)
 
