@@ -134,6 +134,5 @@ logs/*.log
 logs/*.txt
 
 # Project specific
-progress
-progress/*
-trees/*
+progress/
+trees/
