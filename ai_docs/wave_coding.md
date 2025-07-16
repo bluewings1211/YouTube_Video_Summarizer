@@ -85,9 +85,20 @@ The subagent will operate in: `trees/<FEATURE_NAME>-wave/`
 **MANDATORY WAVE WORKFLOW:**
 You MUST complete ALL subtasks within your assigned task group following this exact protocol:
 
-1. **Focus Only on Your Task Group:** Work ONLY on the assigned task group and its subtasks. Do NOT work on other task groups.
+1. **Project Understanding Phase (REQUIRED FIRST STEP):**
+   - **Check for Codebase RAG MCP Tool:** First, check if the `mcp__codebase-rag-mcp__*` tools are available
+   - **If Available, Index the Project:**
+     - Run `mcp__codebase-rag-mcp__index_directory` with `incremental: true` to index the entire project
+     - This ensures you have comprehensive knowledge of the codebase structure and existing implementations
+   - **Analyze Project Structure:** After indexing (or if no RAG tool available):
+     - Use `mcp__codebase-rag-mcp__search` to understand key components relevant to your task group
+     - Review project architecture, existing patterns, and dependencies
+     - Identify files and modules that will be affected by your wave's implementation
+   - **Document Understanding:** Create a brief project context note in your first subtask report
 
-2. **Complete All Subtasks in Order:** Work through each subtask in the assigned group:
+2. **Focus Only on Your Task Group:** Work ONLY on the assigned task group and its subtasks. Do NOT work on other task groups.
+
+3. **Complete All Subtasks in Order:** Work through each subtask in the assigned group:
    - Read the subtask from `tasks/tasks-prd-{FEATURE_NAME}.md`
    - Implement the subtask completely
    - Update `tasks/tasks-prd-{FEATURE_NAME}.md` (mark subtask as `[x]`)
@@ -96,7 +107,7 @@ You MUST complete ALL subtasks within your assigned task group following this ex
    - Git commit changes
    - Move to next subtask in the group
 
-3. **Wave Progress Reporting:**
+4. **Wave Progress Reporting:**
 After completing each subtask, you MUST write to TWO files:
 
 **A. Wave Progress Status File:** `progress/{FEATURE_NAME}-wave.json`
@@ -127,6 +138,12 @@ After completing each subtask, you MUST write to TWO files:
 - **Status**: ✅ Completed
 - **Completion Time**: 2024-01-15T14:30:00Z
 
+## Project Context (First Subtask Only)
+- **Codebase Indexed**: Yes/No (via mcp__codebase-rag-mcp)
+- **Key Project Components**: [List relevant modules/files discovered]
+- **Existing Patterns**: [Patterns and conventions identified]
+- **Dependencies**: [Key dependencies relevant to this wave]
+
 ## Work Performed
 - [Detailed description of work completed]
 - [Key implementation decisions made]
@@ -147,7 +164,7 @@ After completing each subtask, you MUST write to TWO files:
 - [Testing performed and results]
 ```
 
-4. **Wave Completion Protocol:**
+5. **Wave Completion Protocol:**
 When ALL subtasks in your assigned task group are complete:
    - Mark the main task group as `[x]` in `tasks/tasks-prd-{FEATURE_NAME}.md`
    - Update wave status to "completed" in progress JSON
@@ -155,7 +172,7 @@ When ALL subtasks in your assigned task group are complete:
    - Make final wave commit: "Complete Wave {wave-number}: {wave-description}"
    - Return control to main agent with completion report
 
-5. **Wave Summary Report:** `progress/{FEATURE_NAME}-wave-{wave-number}-summary.md`
+6. **Wave Summary Report:** `progress/{FEATURE_NAME}-wave-{wave-number}-summary.md`
 ```markdown
 # Wave {wave-number} Completion Summary
 
